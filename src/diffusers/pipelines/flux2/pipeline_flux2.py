@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
@@ -763,6 +764,8 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         max_sequence_length: int = 512,
         text_encoder_out_layers: Tuple[int] = (10, 20, 30),
         caption_upsample_temperature: float = None,
+        max_inference_steps: Optional[int] = None,
+        verbose: bool = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -941,6 +944,9 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
             sigmas=sigmas,
             mu=mu,
         )
+        if max_inference_steps is not None:
+            num_inference_steps = min(num_inference_steps, max_inference_steps)
+            timesteps = timesteps[:num_inference_steps]
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
@@ -952,7 +958,8 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
         self.scheduler.set_begin_index(0)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        # add progress bar if verbose
+        with (self.progress_bar(total=num_inference_steps) if verbose else nullcontext()) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -1000,7 +1007,7 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if verbose and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
                     progress_bar.update()
 
                 if XLA_AVAILABLE:

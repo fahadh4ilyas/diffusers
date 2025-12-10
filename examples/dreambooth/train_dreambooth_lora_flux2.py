@@ -720,6 +720,15 @@ def parse_args(input_args=None):
             " 1.10.and an Nvidia Ampere GPU.  Default to  fp16 if a GPU is available else fp32."
         ),
     )
+    parser.add_argument(
+        "--torch_clear_cache_step",
+        type=int,
+        default=None,
+        help=(
+            "Number of steps between calls to torch.cuda.empty_cache(). Use this to reduce GPU memory fragmentation."
+            " By default, we do not call torch.cuda.empty_cache() during training."
+        ),
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--enable_npu_flash_attention", action="store_true", help="Enabla Flash Attention for NPU")
 
@@ -778,6 +787,7 @@ class DreamBoothDataset(Dataset):
 
         self.instance_prompt = instance_prompt
         self.custom_instance_prompts = None
+        self.caches = None
         self.class_prompt = class_prompt
 
         self.buckets = buckets
@@ -785,6 +795,12 @@ class DreamBoothDataset(Dataset):
         # if --dataset_name is provided or a metadata jsonl file is provided in the local --instance_data directory,
         # we load the training data using load_dataset
         if args.dataset_name is not None:
+            caches = torch.load(args.dataset_name + f"/cache.pt")
+            for c in caches:
+                c["prompt_embeds"] = c["prompt_embeds"][str(args.train_batch_size)]
+            self.caches = []
+            for cache in caches:
+                self.caches.extend(itertools.repeat(cache, repeats))
             try:
                 from datasets import load_dataset
             except ImportError:
@@ -908,6 +924,12 @@ class DreamBoothDataset(Dataset):
 
         else:  # custom prompts were provided, but length does not match size of image dataset
             example["instance_prompt"] = self.instance_prompt
+        
+        if self.caches:
+            cache = self.caches[index % self.num_instance_images]
+            example["latent_cache"] = cache["latents"]
+            example["prompt_embeds"] = cache["prompt_embeds"]
+            example["text_ids"] = cache["text_ids"]
 
         if self.class_data_root:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
@@ -951,6 +973,15 @@ class DreamBoothDataset(Dataset):
 def collate_fn(examples, with_prior_preservation=False):
     pixel_values = [example["instance_images"] for example in examples]
     prompts = [example["instance_prompt"] for example in examples]
+    latent_cache = None
+    prompt_embeds = None
+    text_ids = None
+    if "latent_cache" in examples[0]:
+        latent_cache = torch.cat([example["latent_cache"] for example in examples])
+    if "prompt_embeds" in examples[0]:
+        prompt_embeds = torch.cat([example["prompt_embeds"] for example in examples])
+    if "text_ids" in examples[0]:
+        text_ids = torch.cat([example["text_ids"] for example in examples])
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
@@ -961,7 +992,7 @@ def collate_fn(examples, with_prior_preservation=False):
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    batch = {"pixel_values": pixel_values, "prompts": prompts}
+    batch = {"pixel_values": pixel_values, "prompts": prompts, "latent_cache": latent_cache, "prompt_embeds": prompt_embeds, "text_ids": text_ids}
     return batch
 
 
@@ -1184,6 +1215,7 @@ def main(args):
         quantization_config=quantization_config,
         torch_dtype=weight_dtype,
     )
+    transformer.set_attention_backend("flash")
     if args.bnb_quantization_config_path is not None:
         transformer = prepare_model_for_kbit_training(transformer, use_gradient_checkpointing=False)
 
@@ -1526,6 +1558,11 @@ def main(args):
         text_ids_cache = []
         latents_cache = []
         for batch in tqdm(train_dataloader, desc="Caching latents"):
+            if "latent_cache" in batch and batch["latent_cache"] is not None:
+                latents_cache.append(batch["latent_cache"])
+                prompt_embeds_cache.append(batch["prompt_embeds"])
+                text_ids_cache.append(batch["text_ids"])
+                continue
             with torch.no_grad():
                 if args.cache_latents:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
@@ -1598,7 +1635,7 @@ def main(args):
         tracker_name = "dreambooth-flux2-lora"
         args_cp = vars(args).copy()
         args_cp["text_encoder_out_layers"] = str(args_cp["text_encoder_out_layers"])
-        accelerator.init_trackers(tracker_name, config=args_cp)
+        accelerator.init_trackers(tracker_name, config=args_cp, init_kwargs={"mlflow": {"run_name": tracker_name}})
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1670,8 +1707,8 @@ def main(args):
 
             with accelerator.accumulate(models_to_accumulate):
                 if train_dataset.custom_instance_prompts:
-                    prompt_embeds = prompt_embeds_cache[step]
-                    text_ids = text_ids_cache[step]
+                    prompt_embeds = prompt_embeds_cache[step].to(device=accelerator.device)
+                    text_ids = text_ids_cache[step].to(device=accelerator.device)
                 else:
                     num_repeat_elements = len(prompts)
                     prompt_embeds = prompt_embeds.repeat(num_repeat_elements, 1, 1)
@@ -1679,7 +1716,10 @@ def main(args):
 
                 # Convert images to latent space
                 if args.cache_latents:
-                    model_input = latents_cache[step].mode()
+                    if not isinstance(latents_cache[step], torch.Tensor):
+                        model_input = latents_cache[step].mode()
+                    else:
+                        model_input = latents_cache[step].to(device=accelerator.device)
                 else:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
                         pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
@@ -1803,6 +1843,8 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
+            if args.torch_clear_cache_step is not None and global_step % args.torch_clear_cache_step == 0:
+                free_memory()
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
