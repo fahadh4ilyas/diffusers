@@ -1223,7 +1223,6 @@ def main(args):
         quantization_config=quantization_config,
         torch_dtype=weight_dtype,
     )
-    transformer.set_attention_backend("flash")
     if args.bnb_quantization_config_path is not None:
         transformer = prepare_model_for_kbit_training(transformer, use_gradient_checkpointing=False)
 
