@@ -366,9 +366,7 @@ def main(args):
             prompt = [example["instance_prompt"]] + [''] * (batch_size - 1)
             prompt_embeds, text_ids = compute_text_embeddings(prompt)
             result["text_ids"] = text_ids[:1]
-            result["prompt_embeds"] = {
-                str(batch_size): prompt_embeds[:1]
-            }
+            result["prompt_embeds"][str(batch_size)] = prompt_embeds[:1]
         latent_caches.append(result)
 
     os.makedirs(args.output_dir, exist_ok=True)
