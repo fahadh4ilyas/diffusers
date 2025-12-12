@@ -1,0 +1,301 @@
+# fastapi_stream_wav.py
+import os
+import time
+import asyncio
+import threading
+import traceback
+import timeit
+from typing import Optional, Any, List, Dict
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
+
+from fastapi import FastAPI, Request, Body
+from fastapi.responses import ORJSONResponse, Response, RedirectResponse
+
+import torch
+import numpy as np
+from contextlib import asynccontextmanager
+
+from .config import config, LOGGER_ACCESS, LOGGER
+from .tools import pil_image_to_bytes
+
+from diffusers import Flux2Pipeline
+
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+ROOT_DIR = os.path.dirname(CURRENT_DIR)
+
+class CommunicationQueue:
+
+    def __init__(self):
+        self.queue: asyncio.Queue = asyncio.Queue()
+        self.ended = False
+
+    async def put(self, item: bytes):
+        await self.queue.put(item)
+
+    def put(self, item: bytes):
+        # sync put
+        self.queue.put_nowait(item)
+    
+    async def get(self) -> bytes:
+        return await self.queue.get()
+
+    async def end(self):
+        self.ended = True
+
+class DataQueue:
+
+    def __init__(self, max_batch_size: int, model: Flux2Pipeline, lora_path: Optional[str] = None):
+        self.active_queue: List[Dict[str, Any]] = []
+        self.queue: List[Dict[str, Any]] = []
+        self.max_batch_size = max_batch_size
+        self.model = model
+        self.lora_path = lora_path
+        self.vae_scale = self.model.vae_scale_factor
+        self.latent_channel = self.model.transformer.config.in_channels
+        self.stopped = False
+        self.loop = asyncio.get_event_loop()
+    
+    def put(
+        self,
+        text: str,
+        num_inference_steps: int,
+        guidance_scale: float,
+        height: int,
+        width: int,
+        queue: CommunicationQueue
+    ):
+        global lock
+        lock.acquire()
+        with torch.no_grad():
+            prompt_embeds, _ = self.model.encode_prompt(prompt=text)
+        lock.release()
+        item = {
+            "queue": queue,
+            "use_lora": text.startswith("[typography]") and self.lora_path is not None,
+            "latent_shape": (1, self.latent_channel, height // (self.vae_scale * 2), width // (self.vae_scale * 2)),
+            "sigmas": np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
+            "step": 0,
+            "finished": False,
+        }
+        item['next_inputs'] = {
+            "prompt_embeds": prompt_embeds,
+            "guidance_scale": guidance_scale,
+            "height": height,
+            "width": width,
+            "latents": None,
+            "sigmas": item["sigmas"][item["step"]:],
+            "output_type": "latent",
+            "max_inference_steps": 1,
+            "verbose": False
+        }
+        if len(self.active_queue) < self.max_batch_size:
+            self.active_queue.append(item)
+        else:
+            self.queue.append(item)
+    
+    def check_queue(self) -> bool:
+        "remove finished items from active queue, fill from waiting queue, but remove cancelled items first from queue"
+        removed_count = 0
+        for i in range(len(self.active_queue)-1, -1, -1):
+            if self.active_queue[i]['finished']:
+                self.active_queue.pop(i)
+                removed_count += 1
+        for i in range(len(self.queue)-1, -1, -1):
+            if self.queue[i]['finished']:
+                self.queue.pop(i)
+        for _ in range(removed_count):
+            if self.queue:
+                item = self.queue.pop(0)
+                self.active_queue.append(item)
+        return len(self.active_queue) > 0
+    
+    @property
+    def is_empty(self):
+        return len(self.active_queue) == 0
+    
+    def log_status(self):
+        LOGGER.info(f"DataQueue status: active={len(self.active_queue)}, waiting={len(self.queue)}")
+
+    def replace_item(self, index: int, item: Dict[str, Any]):
+        if 0 <= index < len(self.active_queue):
+            self.active_queue[index] = item
+
+    def set_stopped(self, stopped: bool):
+        self.stopped = stopped
+
+    def single_step(self, item: Dict[str, Any]):
+        "process a single item for one step"
+        
+        if item['finished']:
+            return item
+        queue: CommunicationQueue = item['queue']
+        if queue.ended:
+            return {
+                "finished": True,
+                "next_inputs": None
+            }
+
+        next_inputs = item['next_inputs']
+        use_lora = item['use_lora']
+        if use_lora:
+            self.model.load_lora_weights(self.lora_path)
+        output = self.model(**next_inputs).images
+        if use_lora:
+            self.model.unload_lora_weights()
+        if next_inputs["output_type"] == "latent":
+            latents = output
+            latents = latents.permute(0, 2, 1).reshape(*item['latent_shape'])
+            next_inputs["latents"] = latents
+            item["step"] += 1
+            next_inputs["sigmas"] = item["sigmas"][item["step"]:]
+            if len(next_inputs["sigmas"]) == 1:
+                next_inputs["output_type"] = "pil"
+            if queue.ended:
+                return {
+                    "finished": True,
+                    "next_inputs": None
+                }
+            return item
+        image_bytes = pil_image_to_bytes(output[0])
+        if queue.ended:
+            return {
+                "finished": True,
+                "next_inputs": None
+            }
+        self.loop.call_soon_threadsafe(queue.put, image_bytes)
+        return {
+            "finished": True,
+            "next_inputs": None
+        }
+    
+    def infinite_loop_step(self):
+        "infinite loop in another thread and the exit if interrupted or get killed"
+
+        log_counter = 0
+        try:
+            while True:
+                if self.stopped:
+                    break
+                now = time.time()
+                if log_counter >= 15.0:
+                    self.log_status()
+                    log_counter = 0
+                if self.is_empty:
+                    time.sleep(0.1)
+                    log_counter += (time.time() - now)
+                    continue
+                self.check_queue()
+                for i in range(len(self.active_queue)):
+                    item = self.active_queue[i]
+                    step_output = self.single_step(item)
+                    self.replace_item(i, step_output)
+                torch.cuda.empty_cache()
+                log_counter += (time.time() - now)
+        except KeyboardInterrupt:
+            LOGGER.info("infinite_loop_step interrupted, exiting")
+        except Exception as exc:
+            LOGGER.error(f"infinite_loop_step exception: {traceback.format_exc()}")
+
+executor = ThreadPoolExecutor(max_workers=4)
+
+# --- model placeholders (load your model in startup) ---
+model: Optional[Flux2Pipeline] = None
+data_queue: Optional[DataQueue] = None
+lock = threading.Lock()
+voice_list = {p.stem.split('_')[0]: p for p in Path(os.path.join(ROOT_DIR, 'sample-voices')).glob('*.wav')}
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global model, data_queue, executor
+
+    model = Flux2Pipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
+    model.transformer.set_attention_backend("flash")
+    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, lora_path=config.lora_path)
+    loop = asyncio.get_event_loop()
+    infinite_thread = loop.run_in_executor(executor, data_queue.infinite_loop_step)
+    LOGGER.info("Startup: model should be loaded here")
+    yield
+    data_queue.set_stopped(True)
+    await infinite_thread
+    LOGGER.info("Shutdown: clean up resources if needed")
+
+app = FastAPI(title='FLUX.2 DreamBooth API',
+    description='API for generating images using FLUX.2 DreamBooth model.',
+    version='1.0.0',
+    lifespan=lifespan)
+
+
+@app.exception_handler(Exception)
+async def value_error_handler(request: Request, exc: Exception):
+    return ORJSONResponse({
+        'error': str(exc),
+        'traceback': "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+        'status_code': 500
+    }, status_code=500)
+
+
+@app.middleware("http")
+async def logging_request(request: Request, call_next):
+
+    client_data = ''
+    if request.client:
+        client_data = f'{request.client.host}:{request.client.port}'
+    LOGGER_ACCESS.info(f'{client_data} - "{request.method.upper()} {request.url.path} {request.url.scheme.upper()}/1.1" START')
+    params = str(request.query_params)
+    body = await request.body()
+    if params:
+        LOGGER_ACCESS.info(f'{client_data} - "{request.method.upper()} {request.url.path} {request.url.scheme.upper()}/1.1" PARAMS: {params}')
+    if body:
+        LOGGER_ACCESS.info(f'{client_data} - "{request.method.upper()} {request.url.path} {request.url.scheme.upper()}/1.1" BODY: {(await request.body())[:256]}')
+
+    start = timeit.default_timer()
+    request.state.is_disconnected = request.is_disconnected
+    response: Response = await call_next(request)
+    response.headers["X-Process-Time"] = f'{timeit.default_timer() - start:.6f}'
+
+    return response
+
+
+@app.post("/generate")
+async def generate_image(
+    request: Request,
+    text: str = Body(...),
+    num_inference_steps: int = Body(50),
+    guidance_scale: float = Body(2.5),
+    height: int = Body(1024),
+    width: int = Body(1024),
+):
+    """
+    Streams a TTS response produced by the model.
+    - only one caller at a time (asyncio.Lock).
+    - cooperative stop via audio_streamer.end().
+    - streaming binary WAV via chunked transfer.
+    """
+    global data_queue
+
+    output_queue = CommunicationQueue()
+
+    data_queue.put(text, num_inference_steps, guidance_scale, height, width, output_queue)
+
+    async def disconnect_watcher():
+        try:
+            is_disc = await request.state.is_disconnected()
+        except Exception:
+            # treat errors as disconnected
+            is_disc = True
+        if is_disc:
+            await output_queue.end()
+
+    disconnect_task = asyncio.create_task(disconnect_watcher())
+
+    image_bytes = await output_queue.get()
+
+    return Response(content=image_bytes, media_type='image/png')
+
+@app.get('/', include_in_schema=False)
+async def redirect():
+
+    # return ORJSONResponse({'title': app.title, 'description': app.description, 'version': app.version})
+    return RedirectResponse(app.root_path+'/docs')
