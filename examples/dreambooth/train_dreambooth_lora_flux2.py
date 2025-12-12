@@ -729,6 +729,14 @@ def parse_args(input_args=None):
             " By default, we do not call torch.cuda.empty_cache() during training."
         ),
     )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="dreambooth-flux2-lora",
+        help=(
+            "An optional descriptor for the run. Used for logging to wandb or other trackers."
+        ),
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--enable_npu_flash_attention", action="store_true", help="Enabla Flash Attention for NPU")
 
@@ -1632,10 +1640,10 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        tracker_name = "dreambooth-flux2-lora"
+        tracker_name = args.run_name
         args_cp = vars(args).copy()
         args_cp["text_encoder_out_layers"] = str(args_cp["text_encoder_out_layers"])
-        accelerator.init_trackers(tracker_name, config=args_cp, init_kwargs={"mlflow": {"run_name": tracker_name}})
+        accelerator.init_trackers(tracker_name, config=args_cp, init_kwargs={"mlflow": {"run_name": args.run_name}})
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
