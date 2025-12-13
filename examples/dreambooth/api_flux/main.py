@@ -66,8 +66,8 @@ class DataQueue:
         images: Optional[List[str]],
         num_inference_steps: int,
         guidance_scale: float,
-        height: int,
-        width: int,
+        height: Optional[int],
+        width: Optional[int],
         queue: CommunicationQueue
     ):
         global lock
@@ -293,8 +293,8 @@ async def generate_image(
     images: Optional[List[str]] = Body(None, examples=[None]),
     num_inference_steps: int = Body(50),
     guidance_scale: float = Body(2.5),
-    height: int = Body(1024),
-    width: int = Body(1024),
+    height: Optional[int] = Body(None, examples=[None]),
+    width: Optional[int] = Body(None, examples=[None]),
 ):
     """
     Generate an image based on the provided text prompt and optional images.
