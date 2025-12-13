@@ -71,9 +71,17 @@ class DataQueue:
         queue: CommunicationQueue
     ):
         global lock
+        image_latents = None
+        image_latent_ids = None
+        lock.acquire()
         if images:
             images = [base64_image_to_pil_image(img) for img in images]
-        lock.acquire()
+            image_latents, image_latent_ids, height, width = self.model.generate_image_latents(
+                image=images,
+                batch_size=1,
+                height=height,
+                width=width,
+            )
         with torch.no_grad():
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
         lock.release()
@@ -86,12 +94,13 @@ class DataQueue:
             "finished": False,
         }
         item['next_inputs'] = {
-            "image": images,
             "prompt_embeds": prompt_embeds,
             "guidance_scale": guidance_scale,
             "height": height,
             "width": width,
             "latents": None,
+            "image_latents": image_latents,
+            "image_latent_ids": image_latent_ids,
             "sigmas": item["sigmas"][item["step"]:],
             "output_type": "latent",
             "max_inference_steps": 1,
@@ -151,8 +160,6 @@ class DataQueue:
         output = self.model(**next_inputs).images
         if use_lora:
             self.model.unload_lora_weights()
-        if "image" in next_inputs and next_inputs["image"] is not None:
-            next_inputs["image"] = None  # images are only used in the first step
         if next_inputs["output_type"] == "latent":
             latents = output
             latents = latents.permute(0, 2, 1).reshape(*item['latent_shape'])
