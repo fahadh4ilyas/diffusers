@@ -74,15 +74,17 @@ class DataQueue:
         image_latents = None
         image_latent_ids = None
         lock.acquire()
-        if images:
-            images = [base64_image_to_pil_image(img) for img in images]
-            image_latents, image_latent_ids, height, width = self.model.generate_image_latents(
-                image=images,
-                batch_size=1,
-                height=height,
-                width=width,
-            )
         with torch.no_grad():
+            if images:
+                images = [base64_image_to_pil_image(img) for img in images]
+                image_latents, image_latent_ids, height, width = self.model.generate_image_latents(
+                    image=images,
+                    batch_size=1,
+                    height=height,
+                    width=width,
+                )
+                image_latents = image_latents.to(device="cpu")
+                image_latent_ids = image_latent_ids.to(device="cpu")
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
         lock.release()
         item = {
