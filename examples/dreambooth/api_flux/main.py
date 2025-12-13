@@ -9,7 +9,7 @@ from typing import Optional, Any, List, Dict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
-from fastapi import FastAPI, Request, Body
+from fastapi import FastAPI, Request, Body, HTTPException
 from fastapi.responses import ORJSONResponse, Response, RedirectResponse
 
 import torch
@@ -17,7 +17,7 @@ import numpy as np
 from contextlib import asynccontextmanager
 
 from .config import config, LOGGER_ACCESS, LOGGER
-from .tools import pil_image_to_bytes
+from .tools import pil_image_to_bytes, base64_image_to_pil_image
 
 from diffusers import Flux2Pipeline
 
@@ -45,12 +45,16 @@ class CommunicationQueue:
 
 class DataQueue:
 
-    def __init__(self, max_batch_size: int, model: Flux2Pipeline, lora_path: Optional[str] = None):
+    def __init__(self, max_batch_size: int, model: Flux2Pipeline, force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None):
         self.active_queue: List[Dict[str, Any]] = []
         self.queue: List[Dict[str, Any]] = []
         self.max_batch_size = max_batch_size
         self.model = model
+        self.force_lora = force_lora
         self.lora_path = lora_path
+        self.lora_keywords = lora_keywords.split(',') if lora_keywords else []
+        if force_lora:
+            self.model.load_lora_weights(self.lora_path)
         self.vae_scale = self.model.vae_scale_factor
         self.latent_channel = self.model.transformer.config.in_channels
         self.stopped = False
@@ -59,6 +63,7 @@ class DataQueue:
     def put(
         self,
         text: str,
+        images: Optional[List[str]],
         num_inference_steps: int,
         guidance_scale: float,
         height: int,
@@ -66,19 +71,22 @@ class DataQueue:
         queue: CommunicationQueue
     ):
         global lock
+        if images:
+            images = [base64_image_to_pil_image(img) for img in images]
         lock.acquire()
         with torch.no_grad():
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
         lock.release()
         item = {
             "queue": queue,
-            "use_lora": text.startswith("[typography]") and self.lora_path is not None,
+            "use_lora": not self.force_lora and any(text.startswith(kw) for kw in self.lora_keywords) and self.lora_path is not None,
             "latent_shape": (1, self.latent_channel, height // (self.vae_scale * 2), width // (self.vae_scale * 2)),
             "sigmas": np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
             "step": 0,
             "finished": False,
         }
         item['next_inputs'] = {
+            "image": images,
             "prompt_embeds": prompt_embeds,
             "guidance_scale": guidance_scale,
             "height": height,
@@ -143,6 +151,8 @@ class DataQueue:
         output = self.model(**next_inputs).images
         if use_lora:
             self.model.unload_lora_weights()
+        if "image" in next_inputs and next_inputs["image"] is not None:
+            next_inputs["image"] = None  # images are only used in the first step
         if next_inputs["output_type"] == "latent":
             latents = output
             latents = latents.permute(0, 2, 1).reshape(*item['latent_shape'])
@@ -188,7 +198,16 @@ class DataQueue:
                 self.check_queue()
                 for i in range(len(self.active_queue)):
                     item = self.active_queue[i]
-                    step_output = self.single_step(item)
+                    try:
+                        step_output = self.single_step(item)
+                    except:
+                        exception = traceback.format_exc()
+                        LOGGER.error(f"DataQueue infinite_loop_step single_step exception: {exception}")
+                        item['queue'].put(f'Error: {exception}'.encode('utf-8'))
+                        step_output = {
+                            "finished": True,
+                            "next_inputs": None
+                        }
                     self.replace_item(i, step_output)
                 torch.cuda.empty_cache()
                 log_counter += (time.time() - now)
@@ -212,7 +231,7 @@ async def lifespan(app: FastAPI):
 
     model = Flux2Pipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
     model.transformer.set_attention_backend("flash")
-    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, lora_path=config.lora_path)
+    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, force_lora=config.force_lora, lora_path=config.lora_path, lora_keywords=config.lora_keywords)
     loop = asyncio.get_event_loop()
     infinite_thread = loop.run_in_executor(executor, data_queue.infinite_loop_step)
     LOGGER.info("Startup: model should be loaded here")
@@ -262,22 +281,27 @@ async def logging_request(request: Request, call_next):
 async def generate_image(
     request: Request,
     text: str = Body(...),
+    images: Optional[List[str]] = Body(None),
     num_inference_steps: int = Body(50),
     guidance_scale: float = Body(2.5),
     height: int = Body(1024),
     width: int = Body(1024),
 ):
     """
-    Streams a TTS response produced by the model.
-    - only one caller at a time (asyncio.Lock).
-    - cooperative stop via audio_streamer.end().
-    - streaming binary WAV via chunked transfer.
+    Generate an image based on the provided text prompt and optional images.
+    Args:
+        text: The text prompt for image generation.
+        images: Optional list of base64 encoded images to condition the generation.
+        num_inference_steps: Number of inference steps for generation.
+        guidance_scale: Guidance scale for generation.
+        height: Height of the generated image.
+        width: Width of the generated image.
     """
     global data_queue
 
     output_queue = CommunicationQueue()
 
-    data_queue.put(text, num_inference_steps, guidance_scale, height, width, output_queue)
+    data_queue.put(text, images, num_inference_steps, guidance_scale, height, width, output_queue)
 
     async def disconnect_watcher():
         try:
@@ -292,10 +316,12 @@ async def generate_image(
 
     image_bytes = await output_queue.get()
 
+    if image_bytes.startswith(b'Error:'):
+        raise HTTPException(status_code=500, detail=image_bytes.decode('utf-8').removeprefix('Error: '))
+
     return Response(content=image_bytes, media_type='image/png')
 
 @app.get('/', include_in_schema=False)
 async def redirect():
 
-    # return ORJSONResponse({'title': app.title, 'description': app.description, 'version': app.version})
     return RedirectResponse(app.root_path+'/docs')
