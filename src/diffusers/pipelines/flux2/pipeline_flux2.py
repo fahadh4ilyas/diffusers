@@ -940,6 +940,9 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 num_images_per_prompt=num_images_per_prompt,
                 generator=generator,
             )
+        elif image_latents is not None and image_latent_ids is not None:
+            image_latents = image_latents.to(device=device)
+            image_latent_ids = image_latent_ids.to(device=device)
 
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
