@@ -280,8 +280,8 @@ async def logging_request(request: Request, call_next):
 @app.post("/generate")
 async def generate_image(
     request: Request,
-    text: str = Body(...),
-    images: Optional[List[str]] = Body(None),
+    text: str = Body(..., examples=["Create a clean, modern, Gen-Z styled digital safety infographic in Indonesian for 'Aware Daily'. Instagram square format (1080x1080). Color palette: Background #F4F4F0 (soft neutral), Primary Blue #2A4A85 (digital navy), Accent Blue #6C8BC7 (soft bright blue), Highlight Mint #A7E2C5 (mint green), Text Color #1C1C1C, Icon Outline #2A4A85. \n\nText content (EXACT COPY):\nTitle: 'KADANG, YANG KAMU LIHAT DI INTERNET TIDAK SE-BENAR ITU.'\nSubtitle: 'Ada hal-hal yang sengaja dibuat untuk mempengaruhi cara kamu berpikir.'\nBullet points:\n\u2022 Konten yang memicu emosi supaya kamu cepat bereaksi\n\u2022 Informasi yang membuat kamu merasa harus berpihak\n\u2022 Postingan yang sengaja dibikin terlihat \"darurat\"\n\u2022 Timeline yang hanya menunjukkan satu sudut pandang\nHighlight box: 'Latih diri untuk berhenti sejenak dan cek ulang informasi.'\nFooter: '@awaredaily'\n\nDesign style: Modern, digital, calming aesthetic with rounded shapes, soft gradients, minimal but stylish. Clean Gen Z layout with soft outline icons next to each bullet point. No human faces. Credible yet friendly appearance. Use the exact colors specified: #F4F4F0 background, #2A4A85 primary blue, #6C8BC7 accent blue, #A7E2C5 mint green, #1C1C1C text color."]),
+    images: Optional[List[str]] = Body(None, examples=[None]),
     num_inference_steps: int = Body(50),
     guidance_scale: float = Body(2.5),
     height: int = Body(1024),
