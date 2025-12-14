@@ -56,6 +56,7 @@ class DataQueue:
         if force_lora:
             self.model.load_lora_weights(self.lora_path)
         self.vae_scale = self.model.vae_scale_factor
+        self.default_sample_size = self.model.default_sample_size
         self.latent_channel = self.model.transformer.config.in_channels
         self.stopped = False
         self.loop = asyncio.get_event_loop()
@@ -87,6 +88,8 @@ class DataQueue:
                 image_latent_ids = image_latent_ids.to(device="cpu")
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
         lock.release()
+        height = height or self.default_sample_size * self.vae_scale
+        width = width or self.default_sample_size * self.vae_scale
         item = {
             "queue": queue,
             "use_lora": not self.force_lora and any(text.startswith(kw) for kw in self.lora_keywords) and self.lora_path is not None,
