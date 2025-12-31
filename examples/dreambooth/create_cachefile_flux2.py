@@ -316,17 +316,21 @@ def main(args):
         subfolder="vae",
         revision=args.revision,
         variant=args.variant,
+        torch_dtype=weight_dtype,
     )
     vae.requires_grad_(False)
     text_encoder = Mistral3ForConditionalGeneration.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        args.pretrained_model_name_or_path,
+        subfolder="text_encoder",
+        revision=args.revision,
+        variant=args.variant,
+        torch_dtype=weight_dtype,
     )
     text_encoder.requires_grad_(False)
 
-    to_kwargs = {"dtype": weight_dtype, "device": 'cuda'}
+    to_kwargs = {"device": 'cuda'}
     vae.to(**to_kwargs)
-    if text_encoder.config.quantization_config is None:
-        text_encoder.to(**to_kwargs)
+    text_encoder.to(**to_kwargs)
 
     text_encoding_pipeline = Flux2Pipeline.from_pretrained(
         args.pretrained_model_name_or_path,
