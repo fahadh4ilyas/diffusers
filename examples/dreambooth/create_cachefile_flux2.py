@@ -325,7 +325,7 @@ def main(args):
 
     to_kwargs = {"dtype": weight_dtype, "device": 'cuda'}
     vae.to(**to_kwargs)
-    if text_encoder.config.quantization_config is not None:
+    if text_encoder.config.quantization_config is None:
         text_encoder.to(**to_kwargs)
 
     text_encoding_pipeline = Flux2Pipeline.from_pretrained(
