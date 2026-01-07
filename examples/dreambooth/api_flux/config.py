@@ -14,6 +14,7 @@ class ApiConfig(BaseSettings):
     force_lora: bool = Field(False)
     lora_path: typing.Optional[str] = Field(None)
     lora_keywords: typing.Optional[str] = Field(None)
+    include_keywords: bool = Field(False)
     max_batch_size: int = Field(4)
 
     class Config:

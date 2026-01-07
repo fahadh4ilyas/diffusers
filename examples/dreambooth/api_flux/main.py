@@ -45,14 +45,15 @@ class CommunicationQueue:
 
 class DataQueue:
 
-    def __init__(self, max_batch_size: int, model: Flux2Pipeline, force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None):
+    def __init__(self, max_batch_size: int, model: Flux2Pipeline, force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None, include_keywords: bool = False):
         self.active_queue: List[Dict[str, Any]] = []
         self.queue: List[Dict[str, Any]] = []
         self.max_batch_size = max_batch_size
         self.model = model
         self.force_lora = force_lora
         self.lora_path = lora_path
-        self.lora_keywords = lora_keywords.split(',') if lora_keywords else []
+        self.lora_keywords = sorted(lora_keywords.split(',') if lora_keywords else [], key=len, reverse=True)
+        self.include_keywords = include_keywords
         if force_lora:
             self.model.load_lora_weights(self.lora_path)
         self.vae_scale = self.model.vae_scale_factor
@@ -75,6 +76,14 @@ class DataQueue:
         image_latents = None
         image_latent_ids = None
         lock.acquire()
+        use_lora = False
+        if not self.force_lora and self.lora_keywords:
+            for kw in self.lora_keywords:
+                if text.startswith(kw):
+                    use_lora = True
+                    if not self.include_keywords:
+                        text = text[len(kw):].lstrip()
+                    break
         with torch.no_grad():
             if images:
                 images = [base64_image_to_pil_image(img) for img in images]
@@ -92,7 +101,7 @@ class DataQueue:
         width = width or self.default_sample_size * self.vae_scale
         item = {
             "queue": queue,
-            "use_lora": not self.force_lora and any(text.startswith(kw) for kw in self.lora_keywords) and self.lora_path is not None,
+            "use_lora": use_lora and self.lora_path is not None,
             "latent_shape": (1, self.latent_channel, height // (self.vae_scale * 2), width // (self.vae_scale * 2)),
             "sigmas": np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
             "step": 0,
