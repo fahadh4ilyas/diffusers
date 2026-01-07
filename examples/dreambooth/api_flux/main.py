@@ -84,6 +84,7 @@ class DataQueue:
                     if not self.include_keywords:
                         text = text.removeprefix(kw).lstrip()
                     break
+        LOGGER.debug(f"DataQueue put: use_lora={use_lora}, text='{text}'")
         with torch.no_grad():
             if images:
                 images = [base64_image_to_pil_image(img) for img in images]
