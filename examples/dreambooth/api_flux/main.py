@@ -82,7 +82,7 @@ class DataQueue:
                 if text.startswith(kw):
                     use_lora = True
                     if not self.include_keywords:
-                        text = text[len(kw):].lstrip()
+                        text = text.removeprefix(kw).lstrip()
                     break
         with torch.no_grad():
             if images:
@@ -170,9 +170,11 @@ class DataQueue:
         next_inputs = item['next_inputs']
         use_lora = item['use_lora']
         if use_lora:
+            LOGGER.debug("Loading LoRA weights")
             self.model.load_lora_weights(self.lora_path)
         output = self.model(**next_inputs).images
         if use_lora:
+            LOGGER.debug("Unloading LoRA weights")
             self.model.unload_lora_weights()
         if next_inputs["output_type"] == "latent":
             latents = output

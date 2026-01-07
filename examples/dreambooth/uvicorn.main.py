@@ -1,4 +1,4 @@
-import os, logging, uvicorn
+import os, logging, uvicorn, argparse
 from api_flux.config import config
 
 ROOT_DIR = os.path.dirname(__file__)
@@ -6,6 +6,10 @@ ROOT_DIR = os.path.dirname(__file__)
 os.makedirs(os.path.join(ROOT_DIR, 'logs'), exist_ok=True)
 
 if __name__ == '__main__':
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--log-level', type=str, default='info', help='Logging level')
+    args = parser.parse_args()
 
     logconfig_dict = {
         'version': 1,
@@ -39,28 +43,28 @@ if __name__ == '__main__':
         'loggers': {
             'gunicorn.access': {
                 'handlers': ['console', 'access'],
-                'level': 'INFO',
+                'level': args.log_level.upper(),
                 'propagate': False
             },
             'uvicorn.access': {
                 'handlers': ['console', 'access'],
-                'level': 'INFO',
+                'level': args.log_level.upper(),
                 'propagate': False
             },
             'gunicorn.error': {
                 'handlers': ['console', 'error'],
-                'level': 'INFO',
+                'level': args.log_level.upper(),
                 'propagate': False
             },
             'uvicorn.error': {
                 'handlers': ['console', 'error'],
-                'level': 'INFO',
+                'level': args.log_level.upper(),
                 'propagate': False
             }
         },
         'root': {
             'handlers': ['console', 'error'],
-            'level': 'INFO'
+            'level': args.log_level.upper()
         }
     }
 
