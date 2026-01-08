@@ -255,7 +255,7 @@ async def lifespan(app: FastAPI):
 
     model = Flux2Pipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
     model.transformer.set_attention_backend("flash")
-    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, force_lora=config.force_lora, lora_path=config.lora_path, lora_keywords=config.lora_keywords)
+    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, force_lora=config.force_lora, lora_path=config.lora_path, lora_keywords=config.lora_keywords, include_keywords=config.include_keywords)
     loop = asyncio.get_event_loop()
     infinite_thread = loop.run_in_executor(executor, data_queue.infinite_loop_step)
     LOGGER.info("Startup: model should be loaded here")
