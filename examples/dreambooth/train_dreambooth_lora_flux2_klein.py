@@ -722,6 +722,23 @@ def parse_args(input_args=None):
             " 1.10.and an Nvidia Ampere GPU.  Default to  fp16 if a GPU is available else fp32."
         ),
     )
+    parser.add_argument(
+        "--torch_clear_cache_step",
+        type=int,
+        default=None,
+        help=(
+            "Number of steps between calls to torch.cuda.empty_cache(). Use this to reduce GPU memory fragmentation."
+            " By default, we do not call torch.cuda.empty_cache() during training."
+        ),
+    )
+    parser.add_argument(
+        "--run_name",
+        type=str,
+        default="dreambooth-flux2-lora",
+        help=(
+            "An optional descriptor for the run. Used for logging to wandb or other trackers."
+        ),
+    )
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--enable_npu_flash_attention", action="store_true", help="Enabla Flash Attention for NPU")
     parser.add_argument("--fsdp_text_encoder", action="store_true", help="Use FSDP for text encoder")
@@ -781,6 +798,7 @@ class DreamBoothDataset(Dataset):
 
         self.instance_prompt = instance_prompt
         self.custom_instance_prompts = None
+        self.caches = None
         self.class_prompt = class_prompt
 
         self.buckets = buckets
@@ -788,6 +806,13 @@ class DreamBoothDataset(Dataset):
         # if --dataset_name is provided or a metadata jsonl file is provided in the local --instance_data directory,
         # we load the training data using load_dataset
         if args.dataset_name is not None:
+            if os.path.exists(args.dataset_name + f"/cache.pt"):
+                caches = torch.load(args.dataset_name + f"/cache.pt")
+                for c in caches:
+                    c["prompt_embeds"] = c["prompt_embeds"][str(args.train_batch_size)]
+                self.caches = []
+                for cache in caches:
+                    self.caches.extend(itertools.repeat(cache, repeats))
             try:
                 from datasets import load_dataset
             except ImportError:
@@ -911,6 +936,12 @@ class DreamBoothDataset(Dataset):
 
         else:  # custom prompts were provided, but length does not match size of image dataset
             example["instance_prompt"] = self.instance_prompt
+        
+        if self.caches:
+            cache = self.caches[index % self.num_instance_images]
+            example["latent_cache"] = cache["latents"]
+            example["prompt_embeds"] = cache["prompt_embeds"]
+            example["text_ids"] = cache["text_ids"]
 
         if self.class_data_root:
             class_image = Image.open(self.class_images_path[index % self.num_class_images])
@@ -954,6 +985,15 @@ class DreamBoothDataset(Dataset):
 def collate_fn(examples, with_prior_preservation=False):
     pixel_values = [example["instance_images"] for example in examples]
     prompts = [example["instance_prompt"] for example in examples]
+    latent_cache = None
+    prompt_embeds = None
+    text_ids = None
+    if "latent_cache" in examples[0]:
+        latent_cache = torch.cat([example["latent_cache"] for example in examples])
+    if "prompt_embeds" in examples[0]:
+        prompt_embeds = torch.cat([example["prompt_embeds"] for example in examples])
+    if "text_ids" in examples[0]:
+        text_ids = torch.cat([example["text_ids"] for example in examples])
 
     # Concat class and instance examples for prior preservation.
     # We do this to avoid doing two forward passes.
@@ -964,7 +1004,7 @@ def collate_fn(examples, with_prior_preservation=False):
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    batch = {"pixel_values": pixel_values, "prompts": prompts}
+    batch = {"pixel_values": pixel_values, "prompts": prompts, "latent_cache": latent_cache, "prompt_embeds": prompt_embeds, "text_ids": text_ids}
     return batch
 
 
@@ -1138,12 +1178,41 @@ def main(args):
                 exist_ok=True,
             ).repo_id
 
-    # Load the tokenizers
-    tokenizer = Qwen2TokenizerFast.from_pretrained(
-        args.pretrained_model_name_or_path,
-        subfolder="tokenizer",
-        revision=args.revision,
+    if args.aspect_ratio_buckets is not None:
+        buckets = parse_buckets_string(args.aspect_ratio_buckets)
+    else:
+        buckets = [(args.resolution, args.resolution)]
+    logger.info(f"Using parsed aspect ratio buckets: {buckets}")
+
+    # Dataset and DataLoaders creation:
+    train_dataset = DreamBoothDataset(
+        instance_data_root=args.instance_data_dir,
+        instance_prompt=args.instance_prompt,
+        class_prompt=args.class_prompt,
+        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
+        class_num=args.num_class_images,
+        size=args.resolution,
+        repeats=args.repeats,
+        center_crop=args.center_crop,
+        buckets=buckets,
     )
+    batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True)
+    train_dataloader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_sampler=batch_sampler,
+        collate_fn=lambda examples: collate_fn(examples, args.with_prior_preservation),
+        num_workers=args.dataloader_num_workers,
+    )
+    must_load_text_encoder = train_dataset.caches is None or args.with_prior_preservation or args.validation_prompt is not None or not train_dataset.custom_instance_prompts
+
+    # Load the tokenizers
+    tokenizer = None
+    if must_load_text_encoder:
+        tokenizer = Qwen2TokenizerFast.from_pretrained(
+            args.pretrained_model_name_or_path,
+            subfolder="tokenizer",
+            revision=args.revision,
+        )
 
     # For mixed precision training we cast all non-trainable weights (vae, text_encoder and transformer) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
@@ -1190,10 +1259,12 @@ def main(args):
     if args.bnb_quantization_config_path is not None:
         transformer = prepare_model_for_kbit_training(transformer, use_gradient_checkpointing=False)
 
-    text_encoder = Qwen3ForCausalLM.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
-    )
-    text_encoder.requires_grad_(False)
+    text_encoder = None
+    if must_load_text_encoder:
+        text_encoder = Qwen3ForCausalLM.from_pretrained(
+            args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant
+        )
+        text_encoder.requires_grad_(False)
 
     # We only train the additional adapter LoRA layers
     transformer.requires_grad_(False)
@@ -1231,17 +1302,19 @@ def main(args):
             transformer, module_filter_fn=module_filter_fn, config=Float8LinearConfig(pad_inner_dim=True)
         )
 
-    text_encoder.to(**to_kwargs)
-    # Initialize a text encoding pipeline and keep it to CPU for now.
-    text_encoding_pipeline = Flux2KleinPipeline.from_pretrained(
-        args.pretrained_model_name_or_path,
-        vae=None,
-        transformer=None,
-        tokenizer=tokenizer,
-        text_encoder=text_encoder,
-        scheduler=None,
-        revision=args.revision,
-    )
+    text_encoding_pipeline = None
+    if text_encoder is not None:
+        text_encoder.to(**to_kwargs)
+        # Initialize a text encoding pipeline and keep it to CPU for now.
+        text_encoding_pipeline = Flux2KleinPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            vae=None,
+            transformer=None,
+            tokenizer=tokenizer,
+            text_encoder=text_encoder,
+            scheduler=None,
+            revision=args.revision,
+        )
 
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
@@ -1437,32 +1510,6 @@ def main(args):
             safeguard_warmup=args.prodigy_safeguard_warmup,
         )
 
-    if args.aspect_ratio_buckets is not None:
-        buckets = parse_buckets_string(args.aspect_ratio_buckets)
-    else:
-        buckets = [(args.resolution, args.resolution)]
-    logger.info(f"Using parsed aspect ratio buckets: {buckets}")
-
-    # Dataset and DataLoaders creation:
-    train_dataset = DreamBoothDataset(
-        instance_data_root=args.instance_data_dir,
-        instance_prompt=args.instance_prompt,
-        class_prompt=args.class_prompt,
-        class_data_root=args.class_data_dir if args.with_prior_preservation else None,
-        class_num=args.num_class_images,
-        size=args.resolution,
-        repeats=args.repeats,
-        center_crop=args.center_crop,
-        buckets=buckets,
-    )
-    batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True)
-    train_dataloader = torch.utils.data.DataLoader(
-        train_dataset,
-        batch_sampler=batch_sampler,
-        collate_fn=lambda examples: collate_fn(examples, args.with_prior_preservation),
-        num_workers=args.dataloader_num_workers,
-    )
-
     def compute_text_embeddings(prompt, text_encoding_pipeline):
         with torch.no_grad():
             prompt_embeds, text_ids = text_encoding_pipeline.encode_prompt(
@@ -1528,6 +1575,11 @@ def main(args):
         text_ids_cache = []
         latents_cache = []
         for batch in tqdm(train_dataloader, desc="Caching latents"):
+            if "latent_cache" in batch and batch["latent_cache"] is not None:
+                latents_cache.append(batch["latent_cache"])
+                prompt_embeds_cache.append(batch["prompt_embeds"])
+                text_ids_cache.append(batch["text_ids"])
+                continue
             with torch.no_grad():
                 if args.cache_latents:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
@@ -1550,8 +1602,9 @@ def main(args):
         del vae
 
     # move back to cpu before deleting to ensure memory is freed see: https://github.com/huggingface/diffusers/issues/11376#issue-3008144624
-    text_encoding_pipeline = text_encoding_pipeline.to("cpu")
-    del text_encoder, tokenizer
+    if must_load_text_encoder:
+        text_encoding_pipeline = text_encoding_pipeline.to("cpu")
+        del text_encoder, tokenizer
     free_memory()
 
     # Scheduler and math around the number of training steps.
@@ -1596,10 +1649,10 @@ def main(args):
     # We need to initialize the trackers we use, and also store our configuration.
     # The trackers initializes automatically on the main process.
     if accelerator.is_main_process:
-        tracker_name = "dreambooth-flux2-klein-lora"
+        tracker_name = args.run_name
         args_cp = vars(args).copy()
         args_cp["text_encoder_out_layers"] = str(args_cp["text_encoder_out_layers"])
-        accelerator.init_trackers(tracker_name, config=args_cp)
+        accelerator.init_trackers(tracker_name, config=args_cp, init_kwargs={"mlflow": {"run_name": args.run_name}})
 
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
@@ -1680,7 +1733,10 @@ def main(args):
 
                 # Convert images to latent space
                 if args.cache_latents:
-                    model_input = latents_cache[step].mode()
+                    if not isinstance(latents_cache[step], torch.Tensor):
+                        model_input = latents_cache[step].mode()
+                    else:
+                        model_input = latents_cache[step].to(device=accelerator.device)
                 else:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
                         pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
@@ -1807,6 +1863,8 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
+            if args.torch_clear_cache_step is not None and global_step % args.torch_clear_cache_step == 0:
+                free_memory()
             logs = {"loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
