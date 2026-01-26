@@ -811,12 +811,13 @@ class DreamBoothDataset(Dataset):
         # if --dataset_name is provided or a metadata jsonl file is provided in the local --instance_data directory,
         # we load the training data using load_dataset
         if args.dataset_name is not None:
-            caches = torch.load(args.dataset_name + f"/cache.pt")
-            for c in caches:
-                c["prompt_embeds"] = c["prompt_embeds"][str(args.train_batch_size)]
-            self.caches = []
-            for cache in caches:
-                self.caches.extend(itertools.repeat(cache, repeats))
+            if os.path.exists(args.dataset_name + f"/cache.pt"):
+                caches = torch.load(args.dataset_name + f"/cache.pt")
+                for c in caches:
+                    c["prompt_embeds"] = c["prompt_embeds"][str(args.train_batch_size)]
+                self.caches = []
+                for cache in caches:
+                    self.caches.extend(itertools.repeat(cache, repeats))
             try:
                 from datasets import load_dataset
             except ImportError:
