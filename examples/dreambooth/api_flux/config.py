@@ -16,6 +16,7 @@ class ApiConfig(BaseSettings):
     lora_keywords: typing.Optional[str] = Field(None)
     include_keywords: bool = Field(False)
     max_batch_size: int = Field(4)
+    is_klein: bool = Field(False)
 
     class Config:
         env_file = dotenv.find_dotenv(usecwd=True)

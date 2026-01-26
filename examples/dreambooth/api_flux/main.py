@@ -5,7 +5,7 @@ import asyncio
 import threading
 import traceback
 import timeit
-from typing import Optional, Any, List, Dict
+from typing import Optional, Any, List, Dict, Union
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from .config import config, LOGGER_ACCESS, LOGGER
 from .tools import pil_image_to_bytes, base64_image_to_pil_image
 
-from diffusers import Flux2Pipeline
+from diffusers import Flux2Pipeline, Flux2KleinPipeline
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CURRENT_DIR)
@@ -45,7 +45,7 @@ class CommunicationQueue:
 
 class DataQueue:
 
-    def __init__(self, max_batch_size: int, model: Flux2Pipeline, force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None, include_keywords: bool = False):
+    def __init__(self, max_batch_size: int, model: Union[Flux2Pipeline, Flux2KleinPipeline], force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None, include_keywords: bool = False, is_klein: bool = False):
         self.active_queue: List[Dict[str, Any]] = []
         self.queue: List[Dict[str, Any]] = []
         self.max_batch_size = max_batch_size
@@ -54,6 +54,7 @@ class DataQueue:
         self.lora_path = lora_path
         self.lora_keywords = sorted(lora_keywords.split(',') if lora_keywords else [], key=len, reverse=True)
         self.include_keywords = include_keywords
+        self.is_klein = is_klein
         if force_lora:
             self.model.load_lora_weights(self.lora_path)
         self.vae_scale = self.model.vae_scale_factor
@@ -97,6 +98,8 @@ class DataQueue:
                 image_latents = image_latents.to(device="cpu")
                 image_latent_ids = image_latent_ids.to(device="cpu")
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
+            if self.is_klein:
+                negative_prompt_embeds, _ = self.model.encode_prompt(prompt="")
         lock.release()
         height = height or self.default_sample_size * self.vae_scale
         width = width or self.default_sample_size * self.vae_scale
@@ -121,6 +124,8 @@ class DataQueue:
             "max_inference_steps": 1,
             "verbose": False
         }
+        if self.is_klein:
+            item['next_inputs']["negative_prompt_embeds"] = negative_prompt_embeds
         if len(self.active_queue) < self.max_batch_size:
             self.active_queue.append(item)
         else:
@@ -253,9 +258,20 @@ voice_list = {p.stem.split('_')[0]: p for p in Path(os.path.join(ROOT_DIR, 'samp
 async def lifespan(app: FastAPI):
     global model, data_queue, executor
 
-    model = Flux2Pipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
+    if config.is_klein:
+        model = Flux2KleinPipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
+    else:
+        model = Flux2Pipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
     model.transformer.set_attention_backend("flash")
-    data_queue = DataQueue(max_batch_size=config.max_batch_size, model=model, force_lora=config.force_lora, lora_path=config.lora_path, lora_keywords=config.lora_keywords, include_keywords=config.include_keywords)
+    data_queue = DataQueue(
+        max_batch_size=config.max_batch_size,
+        model=model,
+        force_lora=config.force_lora,
+        lora_path=config.lora_path,
+        lora_keywords=config.lora_keywords,
+        include_keywords=config.include_keywords,
+        is_klein=config.is_klein
+    )
     loop = asyncio.get_event_loop()
     infinite_thread = loop.run_in_executor(executor, data_queue.infinite_loop_step)
     LOGGER.info("Startup: model should be loaded here")
