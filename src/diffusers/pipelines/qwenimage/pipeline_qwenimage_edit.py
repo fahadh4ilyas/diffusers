@@ -513,10 +513,10 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self,
         num_channels_latents: int,
         batch_size: int,
-        height: int,
-        width: int,
         dtype: torch.dtype,
         device: torch.device,
+        height: Optional[int] = None,
+        width: Optional[int] = None,
         image: Optional[PipelineImageInput] = None,
         prompt_image: Optional[torch.Tensor] = None,
         image_latents: Optional[torch.Tensor] = None,
@@ -524,6 +524,9 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
     ):
 
         if prompt_image is None and image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
+            if height is None:
+                image_size = image[0].size if isinstance(image, list) else image.size
+                height, width, _ = calculate_dimensions(target_area=1024 * 1024, ratio=image_size[1] / image_size[0])
             image, prompt_image = self.preprocess_image(image, height, width)
 
         if image_latents is not None:
@@ -736,10 +739,10 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         image_latents, prompt_image = self.generate_image_latents(
             num_channels_latents,
             batch_size * num_images_per_prompt,
-            calculated_height,
-            calculated_width,
             prompt_embeds.dtype,
             device,
+            calculated_height,
+            calculated_width,
             image,
             prompt_image,
             image_latents,
