@@ -510,6 +510,13 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return latents
 
+    def preprocess_image(self, image: PipelineImageInput, height: Optional[int] = None, width: Optional[int] = None):
+        height = height or self.default_sample_size * self.vae_scale_factor
+        width = width or self.default_sample_size * self.vae_scale_factor
+
+        image = self.image_processor.preprocess(image, height, width)
+        return image.to(dtype=torch.float32)
+
     @property
     def guidance_scale(self):
         return self._guidance_scale
@@ -547,6 +554,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         num_images_per_prompt: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
+        init_image: Optional[torch.Tensor] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         prompt_embeds_mask: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
@@ -680,8 +688,8 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self._interrupt = False
 
         # 2. Preprocess image
-        init_image = self.image_processor.preprocess(image, height=height, width=width)
-        init_image = init_image.to(dtype=torch.float32)
+        if init_image is None:
+            init_image = self.preprocess_image(image, height, width)
 
         # 3. Define call parameters
         if prompt is not None and isinstance(prompt, str):

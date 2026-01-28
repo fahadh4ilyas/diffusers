@@ -471,7 +471,6 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
     def prepare_latents(
         self,
-        image,
         batch_size,
         num_channels_latents,
         height,
@@ -488,29 +487,6 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         shape = (batch_size, 1, num_channels_latents, height, width)
 
-        image_latents = None
-        if image is not None:
-            image = image.to(device=device, dtype=dtype)
-            if image.shape[1] != self.latent_channels:
-                image_latents = self._encode_vae_image(image=image, generator=generator)
-            else:
-                image_latents = image
-            if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
-                # expand init_latents for batch_size
-                additional_image_per_prompt = batch_size // image_latents.shape[0]
-                image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
-            elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
-                raise ValueError(
-                    f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
-                )
-            else:
-                image_latents = torch.cat([image_latents], dim=0)
-
-            image_latent_height, image_latent_width = image_latents.shape[3:]
-            image_latents = self._pack_latents(
-                image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
-            )
-
         if isinstance(generator, list) and len(generator) != batch_size:
             raise ValueError(
                 f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
@@ -522,7 +498,62 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         else:
             latents = latents.to(device=device, dtype=dtype)
 
-        return latents, image_latents
+        return latents
+
+    def preprocess_image(self, image: PipelineImageInput, height: int, width: int, prompt_image: Optional[torch.Tensor] = None):
+
+        image = self.image_processor.resize(image, height, width)
+        prompt_image = image
+        image = self.image_processor.preprocess(image, height, width)
+        image = image.unsqueeze(2)
+
+        return image, prompt_image
+
+    def generate_image_latents(
+        self,
+        num_channels_latents: int,
+        batch_size: int,
+        height: int,
+        width: int,
+        dtype: torch.dtype,
+        device: torch.device,
+        image: Optional[PipelineImageInput] = None,
+        prompt_image: Optional[torch.Tensor] = None,
+        image_latents: Optional[torch.Tensor] = None,
+        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+    ):
+
+        if prompt_image is None and image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
+            image, prompt_image = self.preprocess_image(image, height, width)
+
+        if image_latents is not None:
+            return image_latents, prompt_image
+
+        if image is None:
+            return None, None
+
+        image = image.to(device=device, dtype=dtype)
+        if image.shape[1] != self.latent_channels:
+            image_latents = self._encode_vae_image(image=image, generator=generator)
+        else:
+            image_latents = image
+        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+            # expand init_latents for batch_size
+            additional_image_per_prompt = batch_size // image_latents.shape[0]
+            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+            raise ValueError(
+                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+            )
+        else:
+            image_latents = torch.cat([image_latents], dim=0)
+
+        image_latent_height, image_latent_width = image_latents.shape[3:]
+        image_latents = self._pack_latents(
+            image_latents, batch_size, num_channels_latents, image_latent_height, image_latent_width
+        )
+
+        return image_latents, prompt_image
 
     @property
     def guidance_scale(self):
@@ -560,6 +591,8 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         num_images_per_prompt: int = 1,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
         latents: Optional[torch.Tensor] = None,
+        image_latents: Optional[torch.Tensor] = None,
+        prompt_image: Optional[torch.Tensor] = None,
         prompt_embeds: Optional[torch.Tensor] = None,
         prompt_embeds_mask: Optional[torch.Tensor] = None,
         negative_prompt_embeds: Optional[torch.Tensor] = None,
@@ -698,13 +731,27 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             batch_size = prompt_embeds.shape[0]
 
         device = self._execution_device
-        # 3. Preprocess image
-        if image is not None and not (isinstance(image, torch.Tensor) and image.size(1) == self.latent_channels):
-            image = self.image_processor.resize(image, calculated_height, calculated_width)
-            prompt_image = image
-            image = self.image_processor.preprocess(image, calculated_height, calculated_width)
-            image = image.unsqueeze(2)
-
+        # 3. Generate image latents and prompt image
+        num_channels_latents = self.transformer.config.in_channels // 4
+        image_latents, prompt_image = self.generate_image_latents(
+            num_channels_latents,
+            batch_size * num_images_per_prompt,
+            calculated_height,
+            calculated_width,
+            prompt_embeds.dtype,
+            device,
+            image,
+            prompt_image,
+            image_latents,
+            generator,
+        )
+        img_shapes = [
+            [
+                (1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2),
+                (1, calculated_height // self.vae_scale_factor // 2, calculated_width // self.vae_scale_factor // 2),
+            ]
+        ] * batch_size
+        
         has_neg_prompt = negative_prompt is not None or (
             negative_prompt_embeds is not None and negative_prompt_embeds_mask is not None
         )
@@ -740,9 +787,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             )
 
         # 4. Prepare latent variables
-        num_channels_latents = self.transformer.config.in_channels // 4
-        latents, image_latents = self.prepare_latents(
-            image,
+        latents = self.prepare_latents(
             batch_size * num_images_per_prompt,
             num_channels_latents,
             height,
@@ -752,12 +797,6 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             generator,
             latents,
         )
-        img_shapes = [
-            [
-                (1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2),
-                (1, calculated_height // self.vae_scale_factor // 2, calculated_width // self.vae_scale_factor // 2),
-            ]
-        ] * batch_size
 
         # 5. Prepare timesteps
         sigmas = np.linspace(1.0, 1 / num_inference_steps, num_inference_steps) if sigmas is None else sigmas

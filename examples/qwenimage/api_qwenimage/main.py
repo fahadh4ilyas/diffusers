@@ -66,7 +66,7 @@ class DataQueue:
         self,
         text: str,
         negative_text: Optional[str],
-        image: Optional[str],
+        images: Optional[List[str]],
         strength: Optional[float],
         num_inference_steps: int,
         height: Optional[int],
@@ -92,6 +92,9 @@ class DataQueue:
             if negative_text:
                 negative_prompt_embeds, negative_prompt_embeds_mask = self.model.encode_prompt(prompt=negative_text)
                 true_cfg_scale = 4.0
+            if images:
+                images = [base64_image_to_pil_image(img) for img in images]
+                init_image = self.model.preprocess_image(images, height, width)
         lock.release()
         height = height or self.default_sample_size * self.vae_scale
         width = width or self.default_sample_size * self.vae_scale
@@ -121,9 +124,8 @@ class DataQueue:
                 item['next_inputs']['constant_t_start'] = self.model.calculate_t_start(num_inference_steps=num_inference_steps)
             else:
                 item['next_inputs']['constant_t_start'] = self.model.calculate_t_start(num_inference_steps=num_inference_steps, strength=strength)
-            if image:
-                pil_image = base64_image_to_pil_image(image)
-                item['next_inputs']['image'] = pil_image
+            if images:
+                item['next_inputs']['init_image'] = init_image
             if strength is not None:
                 item['next_inputs']['strength'] = strength
         if len(self.active_queue) < self.max_batch_size:
@@ -319,7 +321,7 @@ async def generate_image(
     request: Request,
     text: str = Body(..., examples=["Create a clean, modern, Gen-Z styled digital safety infographic in Indonesian for 'Aware Daily'. Instagram square format (1080x1080). Color palette: Background #F4F4F0 (soft neutral), Primary Blue #2A4A85 (digital navy), Accent Blue #6C8BC7 (soft bright blue), Highlight Mint #A7E2C5 (mint green), Text Color #1C1C1C, Icon Outline #2A4A85. \n\nText content (EXACT COPY):\nTitle: 'KADANG, YANG KAMU LIHAT DI INTERNET TIDAK SE-BENAR ITU.'\nSubtitle: 'Ada hal-hal yang sengaja dibuat untuk mempengaruhi cara kamu berpikir.'\nBullet points:\n\u2022 Konten yang memicu emosi supaya kamu cepat bereaksi\n\u2022 Informasi yang membuat kamu merasa harus berpihak\n\u2022 Postingan yang sengaja dibikin terlihat \"darurat\"\n\u2022 Timeline yang hanya menunjukkan satu sudut pandang\nHighlight box: 'Latih diri untuk berhenti sejenak dan cek ulang informasi.'\nFooter: '@awaredaily'\n\nDesign style: Modern, digital, calming aesthetic with rounded shapes, soft gradients, minimal but stylish. Clean Gen Z layout with soft outline icons next to each bullet point. No human faces. Credible yet friendly appearance. Use the exact colors specified: #F4F4F0 background, #2A4A85 primary blue, #6C8BC7 accent blue, #A7E2C5 mint green, #1C1C1C text color."]),
     negative_text: Optional[str] = Body(None, examples=[None]),
-    image: Optional[str] = Body(None, examples=[None]),
+    images: Optional[List[str]] = Body(None, examples=[None]),
     strength: Optional[float] = Body(None, examples=[None]),
     num_inference_steps: int = Body(50),
     height: Optional[int] = Body(None, examples=[None]),
@@ -330,7 +332,7 @@ async def generate_image(
     Args:
         text: The text prompt for image generation.
         negative_text: The negative text prompt to avoid certain features in the generated image.
-        image: Optional base64 encoded image to condition the generation.
+        images: Optional list of base64 encoded images to condition the generation.
         strength: Strength of the image conditioning (only for img2img).
         num_inference_steps: Number of inference steps for generation.
         height: Height of the generated image.
@@ -340,7 +342,7 @@ async def generate_image(
 
     output_queue = CommunicationQueue()
 
-    data_queue.put(text, negative_text, image, strength, num_inference_steps, height, width, output_queue)
+    data_queue.put(text, negative_text, images, strength, num_inference_steps, height, width, output_queue)
 
     async def disconnect_watcher():
         try:
