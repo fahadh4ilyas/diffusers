@@ -13,6 +13,7 @@
 # limitations under the License.
 
 import inspect
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -473,6 +474,8 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        max_inference_steps: Optional[int] = None,
+        verbose: bool = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -652,6 +655,9 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             sigmas=sigmas,
             mu=mu,
         )
+        if max_inference_steps is not None:
+            num_inference_steps = min(num_inference_steps, max_inference_steps)
+            timesteps = timesteps[:num_inference_steps]
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
@@ -674,7 +680,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         # 6. Denoising loop
         self.scheduler.set_begin_index(0)
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        with (self.progress_bar(total=num_inference_steps) if verbose else nullcontext()) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -731,7 +737,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if verbose and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
                     progress_bar.update()
 
                 if XLA_AVAILABLE:

@@ -1,4 +1,5 @@
 import inspect
+from contextlib import nullcontext
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import numpy as np
@@ -253,12 +254,19 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return image_latents
 
-    # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
-    def get_timesteps(self, num_inference_steps, strength, device):
-        # get the original timestep using init_timestep
+    def calculate_t_start(self, num_inference_steps, strength: float = 0.6):
         init_timestep = min(num_inference_steps * strength, num_inference_steps)
 
         t_start = int(max(num_inference_steps - init_timestep, 0))
+        return t_start
+
+    # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
+    def get_timesteps(self, num_inference_steps, strength, device, constant_t_start: Optional[int] = None):
+        # get the original timestep using init_timestep
+        if constant_t_start is not None:
+            t_start = constant_t_start
+        else:
+            t_start = self.calculate_t_start(num_inference_steps, strength)
         timesteps = self.scheduler.timesteps[t_start * self.scheduler.order :]
         if hasattr(self.scheduler, "set_begin_index"):
             self.scheduler.set_begin_index(t_start * self.scheduler.order)
@@ -549,6 +557,9 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
         callback_on_step_end_tensor_inputs: List[str] = ["latents"],
         max_sequence_length: int = 512,
+        constant_t_start: Optional[int] = None,
+        max_inference_steps: Optional[int] = None,
+        verbose: bool = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
@@ -731,7 +742,9 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             sigmas=sigmas,
             mu=mu,
         )
-        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device)
+        print(timesteps, num_inference_steps)
+        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device, constant_t_start)
+        print(timesteps, num_inference_steps)
         if num_inference_steps < 1:
             raise ValueError(
                 f"After adjusting the num_inference_steps by strength parameter: {strength}, the number of pipeline"
@@ -754,7 +767,9 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             latents,
         )
         img_shapes = [[(1, height // self.vae_scale_factor // 2, width // self.vae_scale_factor // 2)]] * batch_size
-
+        if max_inference_steps is not None:
+            num_inference_steps = min(num_inference_steps, max_inference_steps)
+            timesteps = timesteps[:num_inference_steps]
         num_warmup_steps = max(len(timesteps) - num_inference_steps * self.scheduler.order, 0)
         self._num_timesteps = len(timesteps)
 
@@ -776,7 +791,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             self._attention_kwargs = {}
 
         # 6. Denoising loop
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
+        with (self.progress_bar(total=num_inference_steps) if verbose else nullcontext()) as progress_bar:
             for i, t in enumerate(timesteps):
                 if self.interrupt:
                     continue
@@ -833,7 +848,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
                     prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
 
                 # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                if verbose and (i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0)):
                     progress_bar.update()
 
                 if XLA_AVAILABLE:
