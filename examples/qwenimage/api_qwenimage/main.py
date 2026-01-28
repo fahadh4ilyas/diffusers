@@ -92,7 +92,7 @@ class DataQueue:
             if negative_text:
                 negative_prompt_embeds, negative_prompt_embeds_mask = self.model.encode_prompt(prompt=negative_text)
                 true_cfg_scale = 4.0
-            if images:
+            if self.image_input and images:
                 images = [base64_image_to_pil_image(img) for img in images]
                 init_image = self.model.preprocess_image(images, height, width)
         lock.release()
