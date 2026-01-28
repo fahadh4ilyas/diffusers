@@ -98,7 +98,7 @@ class DataQueue:
                 image_latents = image_latents.to(device="cpu")
                 image_latent_ids = image_latent_ids.to(device="cpu")
             prompt_embeds, _ = self.model.encode_prompt(prompt=text)
-            if self.is_klein:
+            if self.is_klein and guidance_scale > 1.0 and not self.model.config.is_distilled:
                 negative_prompt_embeds, _ = self.model.encode_prompt(prompt="")
         lock.release()
         height = height or self.default_sample_size * self.vae_scale
@@ -124,7 +124,7 @@ class DataQueue:
             "max_inference_steps": 1,
             "verbose": False
         }
-        if self.is_klein:
+        if self.is_klein and guidance_scale > 1.0 and not self.model.config.is_distilled:
             item['next_inputs']["negative_prompt_embeds"] = negative_prompt_embeds
         if len(self.active_queue) < self.max_batch_size:
             self.active_queue.append(item)
