@@ -258,7 +258,6 @@ async def lifespan(app: FastAPI):
         model = QwenImageImg2ImgPipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
     else:
         model = QwenImagePipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
-    model.transformer.set_attention_backend("flash")
     data_queue = DataQueue(
         max_batch_size=config.max_batch_size,
         model=model,
