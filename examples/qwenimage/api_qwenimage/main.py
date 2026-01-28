@@ -88,8 +88,10 @@ class DataQueue:
             prompt_embeds, prompt_embeds_mask = self.model.encode_prompt(prompt=text)
             negative_prompt_embeds = None
             negative_prompt_embeds_mask = None
+            true_cfg_scale = 1.0
             if negative_text:
                 negative_prompt_embeds, negative_prompt_embeds_mask = self.model.encode_prompt(prompt=negative_text)
+                true_cfg_scale = 4.0
         lock.release()
         height = height or self.default_sample_size * self.vae_scale
         width = width or self.default_sample_size * self.vae_scale
@@ -105,6 +107,7 @@ class DataQueue:
             "prompt_embeds_mask": prompt_embeds_mask,
             "negative_prompt_embeds": negative_prompt_embeds,
             "negative_prompt_embeds_mask": negative_prompt_embeds_mask,
+            "true_cfg_scale": true_cfg_scale,
             "height": height,
             "width": width,
             "latents": None,
