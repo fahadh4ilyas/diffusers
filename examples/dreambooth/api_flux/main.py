@@ -248,7 +248,7 @@ class DataQueue:
 executor = ThreadPoolExecutor(max_workers=4)
 
 # --- model placeholders (load your model in startup) ---
-model: Optional[Flux2Pipeline] = None
+model: Union[Flux2Pipeline, Flux2KleinPipeline, None] = None
 data_queue: Optional[DataQueue] = None
 lock = threading.Lock()
 voice_list = {p.stem.split('_')[0]: p for p in Path(os.path.join(ROOT_DIR, 'sample-voices')).glob('*.wav')}
