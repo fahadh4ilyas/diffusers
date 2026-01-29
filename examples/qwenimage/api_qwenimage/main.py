@@ -246,7 +246,7 @@ class DataQueue:
 executor = ThreadPoolExecutor(max_workers=4)
 
 # --- model placeholders (load your model in startup) ---
-model: Union[QwenImagePipeline, QwenImageImg2ImgPipeline, None] = None
+model: Optional[QwenImageImg2ImgPipeline] = None
 data_queue: Optional[DataQueue] = None
 lock = threading.Lock()
 voice_list = {p.stem.split('_')[0]: p for p in Path(os.path.join(ROOT_DIR, 'sample-voices')).glob('*.wav')}
@@ -256,10 +256,7 @@ voice_list = {p.stem.split('_')[0]: p for p in Path(os.path.join(ROOT_DIR, 'samp
 async def lifespan(app: FastAPI):
     global model, data_queue, executor
 
-    if config.image_input:
-        model = QwenImageImg2ImgPipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
-    else:
-        model = QwenImagePipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
+    model = QwenImageImg2ImgPipeline.from_pretrained(config.model_path, torch_dtype=torch.bfloat16).to('cuda')
     data_queue = DataQueue(
         max_batch_size=config.max_batch_size,
         model=model,
