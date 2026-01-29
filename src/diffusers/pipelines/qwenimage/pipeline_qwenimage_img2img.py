@@ -478,34 +478,36 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         shape = (batch_size, 1, num_channels_latents, height, width)
 
-        # If image is [B,C,H,W] -> add T=1. If it's already [B,C,T,H,W], leave it.
-        if image.dim() == 4:
-            image = image.unsqueeze(2)
-        elif image.dim() != 5:
-            raise ValueError(f"Expected image dims 4 or 5, got {image.dim()}.")
-
         if latents is not None:
             return latents.to(device=device, dtype=dtype)
 
-        image = image.to(device=device, dtype=dtype)
-        if image.shape[1] != self.latent_channels:
-            image_latents = self._encode_vae_image(image=image, generator=generator)  # [B,z,1,H',W']
-        else:
-            image_latents = image
-        if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
-            # expand init_latents for batch_size
-            additional_image_per_prompt = batch_size // image_latents.shape[0]
-            image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
-        elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
-            raise ValueError(
-                f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
-            )
-        else:
-            image_latents = torch.cat([image_latents], dim=0)
+        image_latents = None
+        latents = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
+        if image is not None:
+            # If image is [B,C,H,W] -> add T=1. If it's already [B,C,T,H,W], leave it.
+            if image.dim() == 4:
+                image = image.unsqueeze(2)
+            elif image.dim() != 5:
+                raise ValueError(f"Expected image dims 4 or 5, got {image.dim()}.")
 
-        image_latents = image_latents.transpose(1, 2)  # [B,1,z,H',W']
-        noise = randn_tensor(shape, generator=generator, device=device, dtype=dtype)
-        latents = self.scheduler.scale_noise(image_latents, timestep, noise)
+            image = image.to(device=device, dtype=dtype)
+            if image.shape[1] != self.latent_channels:
+                image_latents = self._encode_vae_image(image=image, generator=generator)  # [B,z,1,H',W']
+            else:
+                image_latents = image
+            if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
+                # expand init_latents for batch_size
+                additional_image_per_prompt = batch_size // image_latents.shape[0]
+                image_latents = torch.cat([image_latents] * additional_image_per_prompt, dim=0)
+            elif batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] != 0:
+                raise ValueError(
+                    f"Cannot duplicate `image` of batch size {image_latents.shape[0]} to {batch_size} text prompts."
+                )
+            else:
+                image_latents = torch.cat([image_latents], dim=0)
+
+            image_latents = image_latents.transpose(1, 2)  # [B,1,z,H',W']
+            latents = self.scheduler.scale_noise(image_latents, timestep, latents)
         latents = self._pack_latents(latents, batch_size, num_channels_latents, height, width)
 
         return latents
@@ -688,7 +690,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self._interrupt = False
 
         # 2. Preprocess image
-        if init_image is None:
+        if init_image is None and image is not None:
             init_image = self.preprocess_image(image, height, width)
 
         # 3. Define call parameters
@@ -750,13 +752,15 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             sigmas=sigmas,
             mu=mu,
         )
-        timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device, constant_t_start)
-        if num_inference_steps < 1:
-            raise ValueError(
-                f"After adjusting the num_inference_steps by strength parameter: {strength}, the number of pipeline"
-                f"steps is {num_inference_steps} which is < 1 and not appropriate for this pipeline."
-            )
-        latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
+        latent_timestep = None
+        if init_image is not None:
+            timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device, constant_t_start)
+            if num_inference_steps < 1:
+                raise ValueError(
+                    f"After adjusting the num_inference_steps by strength parameter: {strength}, the number of pipeline"
+                    f"steps is {num_inference_steps} which is < 1 and not appropriate for this pipeline."
+                )
+            latent_timestep = timesteps[:1].repeat(batch_size * num_images_per_prompt)
 
         # 5. Prepare latent variables
         num_channels_latents = self.transformer.config.in_channels // 4
