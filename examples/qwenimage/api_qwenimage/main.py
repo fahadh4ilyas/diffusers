@@ -5,7 +5,7 @@ import asyncio
 import threading
 import traceback
 import timeit
-from typing import Optional, Any, List, Dict, Union
+from typing import Optional, Any, List, Dict
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 
