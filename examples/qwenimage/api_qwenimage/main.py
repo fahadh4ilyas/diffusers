@@ -19,7 +19,7 @@ from contextlib import asynccontextmanager
 from .config import config, LOGGER_ACCESS, LOGGER
 from .tools import pil_image_to_bytes, base64_image_to_pil_image
 
-from diffusers import QwenImagePipeline, QwenImageImg2ImgPipeline
+from diffusers import QwenImageImg2ImgPipeline
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.dirname(CURRENT_DIR)
@@ -45,7 +45,7 @@ class CommunicationQueue:
 
 class DataQueue:
 
-    def __init__(self, max_batch_size: int, model: Union[QwenImagePipeline, QwenImageImg2ImgPipeline], force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None, include_keywords: bool = False):
+    def __init__(self, max_batch_size: int, model: QwenImageImg2ImgPipeline, force_lora: bool, lora_path: Optional[str] = None, lora_keywords: Optional[str] = None, include_keywords: bool = False):
         self.active_queue: List[Dict[str, Any]] = []
         self.queue: List[Dict[str, Any]] = []
         self.max_batch_size = max_batch_size
@@ -54,7 +54,6 @@ class DataQueue:
         self.lora_path = lora_path
         self.lora_keywords = sorted(lora_keywords.split(',') if lora_keywords else [], key=len, reverse=True)
         self.include_keywords = include_keywords
-        self.image_input = model.__class__ == QwenImageImg2ImgPipeline
         if force_lora:
             self.model.load_lora_weights(self.lora_path)
         self.vae_scale = self.model.vae_scale_factor
@@ -92,7 +91,7 @@ class DataQueue:
             if negative_text:
                 negative_prompt_embeds, negative_prompt_embeds_mask = self.model.encode_prompt(prompt=negative_text)
                 true_cfg_scale = 4.0
-            if self.image_input and images:
+            if images:
                 images = [base64_image_to_pil_image(img) for img in images]
                 init_image = self.model.preprocess_image(images, height, width)
         lock.release()
@@ -119,15 +118,13 @@ class DataQueue:
             "max_inference_steps": 1,
             "verbose": False
         }
-        if self.image_input:
+        if images:
+            item['next_inputs']['init_image'] = init_image
             if strength is None:
                 item['next_inputs']['constant_t_start'] = self.model.calculate_t_start(num_inference_steps=num_inference_steps)
             else:
-                item['next_inputs']['constant_t_start'] = self.model.calculate_t_start(num_inference_steps=num_inference_steps, strength=strength)
-            if images:
-                item['next_inputs']['init_image'] = init_image
-            if strength is not None:
                 item['next_inputs']['strength'] = strength
+                item['next_inputs']['constant_t_start'] = self.model.calculate_t_start(num_inference_steps=num_inference_steps, strength=strength)
         if len(self.active_queue) < self.max_batch_size:
             self.active_queue.append(item)
         else:
