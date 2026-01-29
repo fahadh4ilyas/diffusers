@@ -750,9 +750,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
             sigmas=sigmas,
             mu=mu,
         )
-        print(timesteps, num_inference_steps)
         timesteps, num_inference_steps = self.get_timesteps(num_inference_steps, strength, device, constant_t_start)
-        print(timesteps, num_inference_steps)
         if num_inference_steps < 1:
             raise ValueError(
                 f"After adjusting the num_inference_steps by strength parameter: {strength}, the number of pipeline"
