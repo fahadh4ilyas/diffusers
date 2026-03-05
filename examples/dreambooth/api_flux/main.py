@@ -37,7 +37,13 @@ class CommunicationQueue:
         # sync put
         self.queue.put_nowait(item)
     
-    async def get(self) -> bytes:
+    async def get(self, timeout: Optional[float] = None) -> bytes:
+        if timeout is not None:
+            try:
+                return await asyncio.wait_for(self.queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                self.ended = True
+                return b'Error: Generation timed out'
         return await self.queue.get()
 
     async def end(self):
@@ -331,6 +337,7 @@ async def generate_image(
     guidance_scale: float = Body(2.5),
     height: Optional[int] = Body(None, examples=[None]),
     width: Optional[int] = Body(None, examples=[None]),
+    timeout: Optional[float] = Body(None, examples=[None], gt=0.0),
 ):
     """
     Generate an image based on the provided text prompt and optional images.
@@ -341,6 +348,7 @@ async def generate_image(
         guidance_scale: Guidance scale for generation.
         height: Height of the generated image.
         width: Width of the generated image.
+        timeout: Optional timeout for the generation process.
     """
     global data_queue
 
@@ -359,7 +367,7 @@ async def generate_image(
 
     disconnect_task = asyncio.create_task(disconnect_watcher())
 
-    image_bytes = await output_queue.get()
+    image_bytes = await output_queue.get(timeout=timeout)
 
     if image_bytes.startswith(b'Error:'):
         raise HTTPException(status_code=500, detail=image_bytes.decode('utf-8').removeprefix('Error: '))
