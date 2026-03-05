@@ -134,11 +134,11 @@ class DataQueue:
         "remove finished items from active queue, fill from waiting queue, but remove cancelled items first from queue"
         removed_count = 0
         for i in range(len(self.active_queue)-1, -1, -1):
-            if self.active_queue[i]['finished']:
+            if self.active_queue[i]['finished'] or ('queue' in self.active_queue[i] and self.active_queue[i]['queue'].ended):
                 self.active_queue.pop(i)
                 removed_count += 1
         for i in range(len(self.queue)-1, -1, -1):
-            if self.queue[i]['finished']:
+            if self.queue[i]['finished'] or ('queue' in self.queue[i] and self.queue[i]['queue'].ended):
                 self.queue.pop(i)
         for _ in range(removed_count):
             if self.queue:
