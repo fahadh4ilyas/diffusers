@@ -1,6 +1,6 @@
 import inspect
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -261,7 +261,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         return t_start
 
     # Copied from diffusers.pipelines.stable_diffusion_3.pipeline_stable_diffusion_3_img2img.StableDiffusion3Img2ImgPipeline.get_timesteps
-    def get_timesteps(self, num_inference_steps, strength, device, constant_t_start: Optional[int] = None):
+    def get_timesteps(self, num_inference_steps, strength, device, constant_t_start: int | None = None):
         # get the original timestep using init_timestep
         if constant_t_start is not None:
             t_start = constant_t_start
@@ -523,7 +523,7 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return latents
 
-    def preprocess_image(self, image: PipelineImageInput, height: Optional[int] = None, width: Optional[int] = None):
+    def preprocess_image(self, image: PipelineImageInput, height: int | None = None, width: int | None = None):
         height = height or self.default_sample_size * self.vae_scale_factor
         width = width or self.default_sample_size * self.vae_scale_factor
 
@@ -578,8 +578,8 @@ class QwenImageImg2ImgPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Callable[[int, int], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
-        constant_t_start: Optional[int] = None,
-        max_inference_steps: Optional[int] = None,
+        constant_t_start: int | None = None,
+        max_inference_steps: int | None = None,
         verbose: bool = True,
     ):
         r"""

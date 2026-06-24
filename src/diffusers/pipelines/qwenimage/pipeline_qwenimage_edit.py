@@ -16,7 +16,7 @@ import inspect
 import math
 import PIL.Image
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -513,7 +513,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
 
         return latents
 
-    def preprocess_image(self, image: PipelineImageInput, height: Optional[int] = None, width: Optional[int] = None):
+    def preprocess_image(self, image: PipelineImageInput, height: int | None = None, width: int | None = None):
 
         if height is None:
             image_size = image[0].size if isinstance(image, list) else image.size
@@ -529,13 +529,13 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         self,
         batch_size: int,
         dtype: torch.dtype,
-        num_channels_latents: Optional[int] = None,
-        device: Optional[torch.device] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
-        image: Optional[PipelineImageInput] = None,
-        image_latents: Optional[torch.Tensor] = None,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        num_channels_latents: int | None = None,
+        device: torch.device | None = None,
+        height: int | None = None,
+        width: int | None = None,
+        image: PipelineImageInput | None = None,
+        image_latents: torch.Tensor | None = None,
+        generator: torch.Generator | list[torch.Generator] | None = None,
     ):
 
         num_channels_latents = num_channels_latents or self.transformer.config.in_channels // 4
@@ -623,7 +623,7 @@ class QwenImageEditPipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Callable[[int, int], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
-        max_inference_steps: Optional[int] = None,
+        max_inference_steps: int | None = None,
         verbose: bool = True,
     ):
         r"""

@@ -14,7 +14,7 @@
 
 import inspect
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable
 
 import numpy as np
 import PIL
@@ -688,12 +688,12 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     def generate_image_latents(
         self,
-        image: Union[List[PIL.Image.Image], PIL.Image.Image],
+        image: list[PIL.Image.Image] | PIL.Image.Image,
         batch_size: int,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        height: int | None = None,
+        width: int | None = None,
         num_images_per_prompt: int = 1,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        generator: torch.Generator | list[torch.Generator] | None = None,
     ):
         device = self._execution_device
 
@@ -810,7 +810,7 @@ class Flux2Pipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         max_sequence_length: int = 512,
         text_encoder_out_layers: tuple[int] = (10, 20, 30),
         caption_upsample_temperature: float = None,
-        max_inference_steps: Optional[int] = None,
+        max_inference_steps: int | None = None,
         verbose: bool = True,
     ):
         r"""

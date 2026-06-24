@@ -14,7 +14,7 @@
 
 import inspect
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Union
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -485,7 +485,7 @@ class QwenImagePipeline(DiffusionPipeline, QwenImageLoraLoaderMixin):
         callback_on_step_end: Callable[[int, int], None] | None = None,
         callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
-        max_inference_steps: Optional[int] = None,
+        max_inference_steps: int | None = None,
         verbose: bool = True,
     ):
         r"""
