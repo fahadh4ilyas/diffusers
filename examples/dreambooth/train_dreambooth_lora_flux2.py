@@ -104,7 +104,7 @@ if is_wandb_available():
     import wandb
 
 # Will error if the minimal version of diffusers is not installed. Remove at your own risks.
-check_min_version("0.37.0.dev0")
+check_min_version("0.39.0.dev0")
 
 logger = get_logger(__name__)
 
@@ -930,6 +930,7 @@ class DreamBoothDataset(Dataset):
     def __getitem__(self, index):
         example = {}
         instance_image, bucket_idx = self.pixel_values[index % self.num_instance_images]
+        example["index"] = index
         example["instance_images"] = instance_image
         example["bucket_idx"] = bucket_idx
         if self.custom_instance_prompts:
@@ -988,7 +989,10 @@ class DreamBoothDataset(Dataset):
 
 
 def collate_fn(examples, with_prior_preservation=False):
+    indices = [example["index"] for example in examples]
     pixel_values = [example["instance_images"] for example in examples]
+    # Keep instance_prompts unchanged for prompt cache precompute; prompts may be extended with class prompts below.
+    instance_prompts = [example["instance_prompt"] for example in examples]
     prompts = [example["instance_prompt"] for example in examples]
     latent_cache = None
     prompt_embeds = None
@@ -1009,12 +1013,20 @@ def collate_fn(examples, with_prior_preservation=False):
     pixel_values = torch.stack(pixel_values)
     pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    batch = {"pixel_values": pixel_values, "prompts": prompts, "latent_cache": latent_cache, "prompt_embeds": prompt_embeds, "text_ids": text_ids}
+    batch = {
+        "indices": indices,
+        "pixel_values": pixel_values,
+        "instance_prompts": instance_prompts,
+        "prompts": prompts,
+        "latent_cache": latent_cache,
+        "prompt_embeds": prompt_embeds,
+        "text_ids": text_ids,
+    }
     return batch
 
 
 class BucketBatchSampler(BatchSampler):
-    def __init__(self, dataset: DreamBoothDataset, batch_size: int, drop_last: bool = False):
+    def __init__(self, dataset: DreamBoothDataset, batch_size: int, drop_last: bool = False, seed: int = None):
         if not isinstance(batch_size, int) or batch_size <= 0:
             raise ValueError("batch_size should be a positive integer value, but got batch_size={}".format(batch_size))
         if not isinstance(drop_last, bool):
@@ -1023,6 +1035,7 @@ class BucketBatchSampler(BatchSampler):
         self.dataset = dataset
         self.batch_size = batch_size
         self.drop_last = drop_last
+        self.generator = random.Random(seed) if seed is not None else random
 
         # Group indices by bucket
         self.bucket_indices = [[] for _ in range(len(self.dataset.buckets))]
@@ -1030,24 +1043,25 @@ class BucketBatchSampler(BatchSampler):
             self.bucket_indices[bucket_idx].append(idx)
 
         self.sampler_len = 0
-        self.batches = []
-
-        # Pre-generate batches for each bucket
         for indices_in_bucket in self.bucket_indices:
-            # Shuffle indices within the bucket
-            random.shuffle(indices_in_bucket)
-            # Create batches
-            for i in range(0, len(indices_in_bucket), self.batch_size):
-                batch = indices_in_bucket[i : i + self.batch_size]
-                if len(batch) < self.batch_size and self.drop_last:
-                    continue  # Skip partial batch if drop_last is True
-                self.batches.append(batch)
-                self.sampler_len += 1  # Count the number of batches
+            num_batches, remainder = divmod(len(indices_in_bucket), self.batch_size)
+            self.sampler_len += num_batches
+            if remainder > 0 and not self.drop_last:
+                self.sampler_len += 1
 
     def __iter__(self):
-        # Shuffle the order of the batches each epoch
-        random.shuffle(self.batches)
-        for batch in self.batches:
+        batches = []
+        for indices_in_bucket in self.bucket_indices:
+            shuffled_indices = indices_in_bucket.copy()
+            self.generator.shuffle(shuffled_indices)
+            for i in range(0, len(shuffled_indices), self.batch_size):
+                batch = shuffled_indices[i : i + self.batch_size]
+                if len(batch) < self.batch_size and self.drop_last:
+                    continue
+                batches.append(batch)
+
+        self.generator.shuffle(batches)
+        for batch in batches:
             yield batch
 
     def __len__(self):
@@ -1296,7 +1310,13 @@ def main(args):
     if args.lora_layers is not None:
         target_modules = [layer.strip() for layer in args.lora_layers.split(",")]
     else:
-        target_modules = ["to_k", "to_q", "to_v", "to_out.0"]
+        # target_modules = ["to_k", "to_q", "to_v", "to_out.0"] # just train transformer_blocks
+
+        # train transformer_blocks and single_transformer_blocks
+        target_modules = ["to_k", "to_q", "to_v", "to_out.0"] + [
+            "to_qkv_mlp_proj",
+            *[f"single_transformer_blocks.{i}.attn.to_out" for i in range(48)],
+        ]
 
     # now we will add new LoRA weights the transformer layers
     transformer_lora_config = LoraConfig(
@@ -1502,7 +1522,7 @@ def main(args):
         center_crop=args.center_crop,
         buckets=buckets,
     )
-    batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True)
+    batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True, seed=args.seed)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         batch_sampler=batch_sampler,
@@ -1615,6 +1635,8 @@ def main(args):
         if args.with_prior_preservation:
             prompt_embeds = torch.cat([prompt_embeds, class_prompt_hidden_states], dim=0)
             text_ids = torch.cat([text_ids, class_text_ids], dim=0)
+        static_prompt_embeds = prompt_embeds
+        static_text_ids = text_ids
 
     # if cache_latents is set to True, we encode images to latents and store them.
     # Similar to pre-encoding in the case of a single instance prompt, if custom prompts are provided
@@ -1779,9 +1801,12 @@ def main(args):
                     prompt_embeds = prompt_embeds_cache[step].to(device=accelerator.device)
                     text_ids = text_ids_cache[step].to(device=accelerator.device)
                 else:
-                    num_repeat_elements = len(prompts)
-                    prompt_embeds = prompt_embeds.repeat(num_repeat_elements, 1, 1)
-                    text_ids = text_ids.repeat(num_repeat_elements, 1, 1)
+                    # With prior preservation, prompt_embeds/text_ids already contain [instance, class] entries,
+                    # while collate_fn orders batches as [inst1..instB, class1..classB]. Repeat each entry along
+                    # dim 0 to preserve that grouping instead of interleaving [inst, class, inst, class, ...].
+                    num_repeat_elements = len(prompts) // 2 if args.with_prior_preservation else len(prompts)
+                    prompt_embeds = static_prompt_embeds.repeat_interleave(num_repeat_elements, dim=0)
+                    text_ids = static_text_ids.repeat_interleave(num_repeat_elements, dim=0)
 
                 # Convert images to latent space
                 if args.cache_latents:
@@ -1791,8 +1816,8 @@ def main(args):
                         model_input = latents_cache[step].to(device=accelerator.device)
                 else:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
-                        pixel_values = batch["pixel_values"].to(dtype=vae.dtype)
-                    model_input = vae.encode(pixel_values).latent_dist.mode()
+                        pixel_values = batch["pixel_values"].to(device=accelerator.device, dtype=vae.dtype)
+                        model_input = vae.encode(pixel_values).latent_dist.mode()
 
                 model_input = Flux2Pipeline._patchify_latents(model_input)
                 model_input = (model_input - latents_bn_mean) / latents_bn_std
@@ -1851,10 +1876,11 @@ def main(args):
                     # Chunk the noise and model_pred into two parts and compute the loss on each part separately.
                     model_pred, model_pred_prior = torch.chunk(model_pred, 2, dim=0)
                     target, target_prior = torch.chunk(target, 2, dim=0)
+                    weighting, weighting_prior = torch.chunk(weighting, 2, dim=0)
 
                     # Compute prior loss
                     prior_loss = torch.mean(
-                        (weighting.float() * (model_pred_prior.float() - target_prior.float()) ** 2).reshape(
+                        (weighting_prior.float() * (model_pred_prior.float() - target_prior.float()) ** 2).reshape(
                             target_prior.shape[0], -1
                         ),
                         1,
