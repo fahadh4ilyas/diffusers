@@ -18,7 +18,7 @@ import unittest
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, BertModel, T5EncoderModel
+from transformers import AutoConfig, AutoTokenizer, BertModel, T5EncoderModel
 
 from diffusers import (
     AutoencoderKL,
@@ -96,7 +96,10 @@ class HunyuanDiTControlNetPipelineFastTests(unittest.TestCase, PipelineTesterMix
         scheduler = DDPMScheduler()
         text_encoder = BertModel.from_pretrained("hf-internal-testing/tiny-random-BertModel")
         tokenizer = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-BertModel")
-        text_encoder_2 = T5EncoderModel.from_pretrained("hf-internal-testing/tiny-random-t5")
+
+        torch.manual_seed(0)
+        config = AutoConfig.from_pretrained("hf-internal-testing/tiny-random-t5")
+        text_encoder_2 = T5EncoderModel(config)
         tokenizer_2 = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-t5")
 
         components = {
@@ -123,7 +126,7 @@ class HunyuanDiTControlNetPipelineFastTests(unittest.TestCase, PipelineTesterMix
             (1, 3, 16, 16),
             generator=generator,
             device=torch.device(device),
-            dtype=torch.float16,
+            dtype=torch.float32,
         )
 
         controlnet_conditioning_scale = 0.5
@@ -143,7 +146,7 @@ class HunyuanDiTControlNetPipelineFastTests(unittest.TestCase, PipelineTesterMix
     def test_controlnet_hunyuandit(self):
         components = self.get_dummy_components()
         pipe = HunyuanDiTControlNetPipeline(**components)
-        pipe = pipe.to(torch_device, dtype=torch.float16)
+        pipe = pipe.to(torch_device, dtype=torch.float32)
         pipe.set_progress_bar_config(disable=None)
 
         inputs = self.get_dummy_inputs(torch_device)
@@ -153,14 +156,7 @@ class HunyuanDiTControlNetPipelineFastTests(unittest.TestCase, PipelineTesterMix
         image_slice = image[0, -3:, -3:, -1]
         assert image.shape == (1, 16, 16, 3)
 
-        if torch_device == "xpu":
-            expected_slice = np.array(
-                [0.6948242, 0.89160156, 0.59375, 0.5078125, 0.57910156, 0.6035156, 0.58447266, 0.53564453, 0.52246094]
-            )
-        else:
-            expected_slice = np.array(
-                [0.6953125, 0.89208984, 0.59375, 0.5078125, 0.5786133, 0.6035156, 0.5839844, 0.53564453, 0.52246094]
-            )
+        expected_slice = np.array([0.5925, 0.5392, 0.4450, 0.7140, 0.3954, 0.3553, 0.3842, 0.5994, 0.3765])
 
         assert np.abs(image_slice.flatten() - expected_slice).max() < 1e-2, (
             f"Expected: {expected_slice}, got: {image_slice.flatten()}"

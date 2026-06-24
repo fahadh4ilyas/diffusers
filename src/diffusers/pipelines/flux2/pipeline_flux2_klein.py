@@ -14,7 +14,7 @@
 
 import inspect
 from contextlib import nullcontext
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, List, Optional, Union
 
 import numpy as np
 import PIL
@@ -25,7 +25,7 @@ from ...loaders import Flux2LoraLoaderMixin
 from ...models import AutoencoderKLFlux2, Flux2Transformer2DModel
 from ...schedulers import FlowMatchEulerDiscreteScheduler
 from ...utils import is_torch_xla_available, logging, replace_example_docstring
-from ...utils.torch_utils import randn_tensor
+from ...utils.torch_utils import maybe_adjust_dtype_for_device, randn_tensor
 from ..pipeline_utils import DiffusionPipeline
 from .image_processor import Flux2ImageProcessor
 from .pipeline_output import Flux2PipelineOutput
@@ -82,10 +82,10 @@ def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
+    num_inference_steps: int | None = None,
+    device: str | torch.device | None = None,
+    timesteps: list[int] | None = None,
+    sigmas: list[float] | None = None,
     **kwargs,
 ):
     r"""
@@ -100,15 +100,15 @@ def retrieve_timesteps(
             must be `None`.
         device (`str` or `torch.device`, *optional*):
             The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
+        timesteps (`list[int]`, *optional*):
             Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
             `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`List[float]`, *optional*):
+        sigmas (`list[float]`, *optional*):
             Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
             `num_inference_steps` and `timesteps` must be `None`.
 
     Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        `tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
         second element is the number of inference steps.
     """
     if timesteps is not None and sigmas is not None:
@@ -141,7 +141,7 @@ def retrieve_timesteps(
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
-    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
+    encoder_output: torch.Tensor, generator: torch.Generator | None = None, sample_mode: str = "sample"
 ):
     if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
         return encoder_output.latent_dist.sample(generator)
@@ -209,11 +209,11 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     def _get_qwen3_prompt_embeds(
         text_encoder: Qwen3ForCausalLM,
         tokenizer: Qwen2TokenizerFast,
-        prompt: Union[str, List[str]],
-        dtype: Optional[torch.dtype] = None,
-        device: Optional[torch.device] = None,
+        prompt: str | list[str],
+        dtype: torch.dtype | None = None,
+        device: torch.device | None = None,
         max_sequence_length: int = 512,
-        hidden_states_layers: List[int] = (9, 18, 27),
+        hidden_states_layers: list[int] = (9, 18, 27),
     ):
         dtype = text_encoder.dtype if dtype is None else dtype
         device = text_encoder.device if device is None else device
@@ -266,7 +266,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._prepare_text_ids
     def _prepare_text_ids(
         x: torch.Tensor,  # (B, L, D) or (L, D)
-        t_coord: Optional[torch.Tensor] = None,
+        t_coord: torch.Tensor | None = None,
     ):
         B, L, _ = x.shape
         out_ids = []
@@ -318,7 +318,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     @staticmethod
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._prepare_image_ids
     def _prepare_image_ids(
-        image_latents: List[torch.Tensor],  # [(1, C, H, W), (1, C, H, W), ...]
+        image_latents: list[torch.Tensor],  # [(1, C, H, W), (1, C, H, W), ...]
         scale: int = 10,
     ):
         r"""
@@ -328,7 +328,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         dimensions.
 
         Args:
-            image_latents (List[torch.Tensor]):
+            image_latents (list[torch.Tensor]):
                 A list of image latent feature tensors, typically of shape (C, H, W).
             scale (int, optional):
                 A factor used to define the time separation (T-coordinate) between latents. T-coordinate for the i-th
@@ -397,19 +397,22 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         return latents
 
     @staticmethod
-    # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline._unpack_latents_with_ids
-    def _unpack_latents_with_ids(x: torch.Tensor, x_ids: torch.Tensor) -> list[torch.Tensor]:
+    def _unpack_latents_with_ids(
+        x: torch.Tensor, x_ids: torch.Tensor, height: int | None = None, width: int | None = None
+    ) -> list[torch.Tensor]:
         """
         using position ids to scatter tokens into place
         """
         x_list = []
         for data, pos in zip(x, x_ids):
             _, ch = data.shape  # noqa: F841
-            h_ids = pos[:, 1].to(torch.int64)
-            w_ids = pos[:, 2].to(torch.int64)
+            idx_dtype = maybe_adjust_dtype_for_device(torch.int64, data.device)
+            h_ids = pos[:, 1].to(idx_dtype)
+            w_ids = pos[:, 2].to(idx_dtype)
 
-            h = torch.max(h_ids) + 1
-            w = torch.max(w_ids) + 1
+            # Use provided height/width to avoid DtoH sync from torch.max().item()
+            h = height if height is not None else torch.max(h_ids) + 1
+            w = width if width is not None else torch.max(w_ids) + 1
 
             flat_ids = h_ids * w + w_ids
 
@@ -425,12 +428,12 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
 
     def encode_prompt(
         self,
-        prompt: Union[str, List[str]],
-        device: Optional[torch.device] = None,
+        prompt: str | list[str],
+        device: torch.device | None = None,
         num_images_per_prompt: int = 1,
-        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt_embeds: torch.Tensor | None = None,
         max_sequence_length: int = 512,
-        text_encoder_out_layers: Tuple[int] = (9, 18, 27),
+        text_encoder_out_layers: tuple[int] = (9, 18, 27),
     ):
         device = device or self._execution_device
 
@@ -466,7 +469,9 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         image_latents = self._patchify_latents(image_latents)
 
         latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(image_latents.device, image_latents.dtype)
-        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps)
+        latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(
+            image_latents.device, image_latents.dtype
+        )
         image_latents = (image_latents - latents_bn_mean) / latents_bn_std
 
         return image_latents
@@ -481,7 +486,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         dtype,
         device,
         generator: torch.Generator,
-        latents: Optional[torch.Tensor] = None,
+        latents: torch.Tensor | None = None,
     ):
         # VAE applies 8x compression on images but we must also account for packing which requires
         # latent height and width to be divisible by 2.
@@ -508,7 +513,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     # Copied from diffusers.pipelines.flux2.pipeline_flux2.Flux2Pipeline.prepare_image_latents
     def prepare_image_latents(
         self,
-        images: List[torch.Tensor],
+        images: list[torch.Tensor],
         batch_size,
         generator: torch.Generator,
         device,
@@ -651,28 +656,28 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        image: Optional[Union[List[PIL.Image.Image], PIL.Image.Image]] = None,
-        prompt: Union[str, List[str]] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        image: list[PIL.Image.Image] | PIL.Image.Image | None = None,
+        prompt: str | list[str] = None,
+        height: int | None = None,
+        width: int | None = None,
         num_inference_steps: int = 50,
-        sigmas: Optional[List[float]] = None,
-        guidance_scale: Optional[float] = 4.0,
+        sigmas: list[float] | None = None,
+        guidance_scale: float = 4.0,
         num_images_per_prompt: int = 1,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.Tensor] = None,
-        image_latents: Optional[torch.Tensor] = None,
-        image_latent_ids: Optional[torch.Tensor] = None,
-        prompt_embeds: Optional[torch.Tensor] = None,
-        negative_prompt_embeds: Optional[Union[str, List[str]]] = None,
-        output_type: Optional[str] = "pil",
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.Tensor | None = None,
+        image_latents: torch.Tensor | None = None,
+        image_latent_ids: torch.Tensor | None = None,
+        prompt_embeds: torch.Tensor | None = None,
+        negative_prompt_embeds: str | list[str] | None = None,
+        output_type: str = "pil",
         return_dict: bool = True,
-        attention_kwargs: Optional[Dict[str, Any]] = None,
-        callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        attention_kwargs: dict[str, Any] | None = None,
+        callback_on_step_end: Callable[[int, int, dict], None] | None = None,
+        callback_on_step_end_tensor_inputs: list[str] = ["latents"],
         max_sequence_length: int = 512,
-        text_encoder_out_layers: Tuple[int] = (9, 18, 27),
-        max_inference_steps: Optional[int] = None,
+        text_encoder_out_layers: tuple[int] = (9, 18, 27),
+        max_inference_steps: int | None = None,
         verbose: bool = True,
     ):
         r"""
@@ -746,7 +751,7 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
                 will be passed as `callback_kwargs` argument. You will only be able to include variables listed in the
                 `._callback_tensor_inputs` attribute of your pipeline class.
             max_sequence_length (`int` defaults to 512): Maximum sequence length to use with the `prompt`.
-            text_encoder_out_layers (`Tuple[int]`):
+            text_encoder_out_layers (`tuple[int]`):
                 Layer indices to use in the `text_encoder` to derive the final prompt embeddings.
 
         Examples:
@@ -857,7 +862,8 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         # 7. Denoising loop
         # We set the index here to remove DtoH sync, helpful especially during compilation.
         # Check out more details here: https://github.com/huggingface/diffusers/pull/11696
-        self.scheduler.set_begin_index(0)
+        if hasattr(self.scheduler, "set_begin_index"):
+            self.scheduler.set_begin_index(0)
         # add progress bar if verbose
         with (self.progress_bar(total=num_inference_steps) if verbose else nullcontext()) as progress_bar:
             for i, t in enumerate(timesteps):
@@ -934,7 +940,10 @@ class Flux2KleinPipeline(DiffusionPipeline, Flux2LoraLoaderMixin):
         if output_type == "latent":
             image = latents
         else:
-            latents = self._unpack_latents_with_ids(latents, latent_ids)
+            # Pass pre-computed latent height/width to avoid DtoH sync from torch.max().item()
+            latent_height = 2 * (int(height) // (self.vae_scale_factor * 2))
+            latent_width = 2 * (int(width) // (self.vae_scale_factor * 2))
+            latents = self._unpack_latents_with_ids(latents, latent_ids, latent_height // 2, latent_width // 2)
 
             latents_bn_mean = self.vae.bn.running_mean.view(1, -1, 1, 1).to(latents.device, latents.dtype)
             latents_bn_std = torch.sqrt(self.vae.bn.running_var.view(1, -1, 1, 1) + self.vae.config.batch_norm_eps).to(

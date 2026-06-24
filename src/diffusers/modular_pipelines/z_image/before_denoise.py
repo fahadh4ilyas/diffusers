@@ -13,7 +13,6 @@
 # limitations under the License.
 
 import inspect
-from typing import List, Optional, Tuple, Union
 
 import torch
 
@@ -91,7 +90,7 @@ def repeat_tensor_to_batch_size(
     return input_tensor
 
 
-def calculate_dimension_from_latents(latents: torch.Tensor, vae_scale_factor_spatial: int) -> Tuple[int, int]:
+def calculate_dimension_from_latents(latents: torch.Tensor, vae_scale_factor_spatial: int) -> tuple[int, int]:
     """Calculate image dimensions from latent tensor dimensions.
 
     This function converts latent spatial dimensions to image spatial dimensions by multiplying the latent height/width
@@ -103,7 +102,7 @@ def calculate_dimension_from_latents(latents: torch.Tensor, vae_scale_factor_spa
         vae_scale_factor (int): The scale factor used by the VAE to compress image spatial dimension.
             By default, it is 16
     Returns:
-        Tuple[int, int]: The calculated image dimensions as (height, width)
+        tuple[int, int]: The calculated image dimensions as (height, width)
     """
     latent_height, latent_width = latents.shape[2:]
     height = latent_height * vae_scale_factor_spatial // 2
@@ -129,10 +128,10 @@ def calculate_shift(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
+    num_inference_steps: int | None = None,
+    device: str | torch.device | None = None,
+    timesteps: list[int] | None = None,
+    sigmas: list[float] | None = None,
     **kwargs,
 ):
     r"""
@@ -147,15 +146,15 @@ def retrieve_timesteps(
             must be `None`.
         device (`str` or `torch.device`, *optional*):
             The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
+        timesteps (`list[int]`, *optional*):
             Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
             `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`List[float]`, *optional*):
+        sigmas (`list[float]`, *optional*):
             Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
             `num_inference_steps` and `timesteps` must be `None`.
 
     Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        `tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
         second element is the number of inference steps.
     """
     if timesteps is not None and sigmas is not None:
@@ -186,6 +185,11 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
+# Copied from diffusers.pipelines.z_image.pipeline_z_image.get_default_z_image_sigmas
+def get_default_z_image_sigmas(num_inference_steps: int) -> list[float]:
+    return torch.linspace(1.0, 1 / num_inference_steps, num_inference_steps).tolist()
+
+
 class ZImageTextInputStep(ModularPipelineBlocks):
     model_name = "z-image"
 
@@ -201,30 +205,30 @@ class ZImageTextInputStep(ModularPipelineBlocks):
         )
 
     @property
-    def expected_components(self) -> List[ComponentSpec]:
+    def expected_components(self) -> list[ComponentSpec]:
         return [
             ComponentSpec("transformer", ZImageTransformer2DModel),
         ]
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         return [
             InputParam("num_images_per_prompt", default=1),
             InputParam(
                 "prompt_embeds",
                 required=True,
-                type_hint=List[torch.Tensor],
+                type_hint=list[torch.Tensor],
                 description="Pre-generated text embeddings. Can be generated from text_encoder step.",
             ),
             InputParam(
                 "negative_prompt_embeds",
-                type_hint=List[torch.Tensor],
+                type_hint=list[torch.Tensor],
                 description="Pre-generated negative text embeddings. Can be generated from text_encoder step.",
             ),
         ]
 
     @property
-    def intermediate_outputs(self) -> List[str]:
+    def intermediate_outputs(self) -> list[str]:
         return [
             OutputParam(
                 "batch_size",
@@ -283,8 +287,8 @@ class ZImageAdditionalInputsStep(ModularPipelineBlocks):
 
     def __init__(
         self,
-        image_latent_inputs: List[str] = ["image_latents"],
-        additional_batch_inputs: List[str] = [],
+        image_latent_inputs: list[str] = ["image_latents"],
+        additional_batch_inputs: list[str] = [],
     ):
         """Initialize a configurable step that standardizes the inputs for the denoising step. It:\n"
 
@@ -295,10 +299,10 @@ class ZImageAdditionalInputsStep(ModularPipelineBlocks):
         This is a dynamic block that allows you to configure which inputs to process.
 
         Args:
-            image_latent_inputs (List[str], optional): Names of image latent tensors to process.
+            image_latent_inputs (list[str], optional): Names of image latent tensors to process.
                 In additional to adjust batch size of these inputs, they will be used to determine height/width. Can be
                 a single string or list of strings. Defaults to ["image_latents"].
-            additional_batch_inputs (List[str], optional):
+            additional_batch_inputs (list[str], optional):
                 Names of additional conditional input tensors to expand batch size. These tensors will only have their
                 batch dimensions adjusted to match the final batch size. Can be a single string or list of strings.
                 Defaults to [].
@@ -346,7 +350,7 @@ class ZImageAdditionalInputsStep(ModularPipelineBlocks):
         return summary_section + inputs_info + placement_section
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         inputs = [
             InputParam(name="num_images_per_prompt", default=1),
             InputParam(name="batch_size", required=True),
@@ -406,11 +410,11 @@ class ZImagePrepareLatentsStep(ModularPipelineBlocks):
         return "Prepare latents step that prepares the latents for the text-to-video generation process"
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         return [
             InputParam("height", type_hint=int),
             InputParam("width", type_hint=int),
-            InputParam("latents", type_hint=Optional[torch.Tensor]),
+            InputParam("latents", type_hint=torch.Tensor | None),
             InputParam("num_images_per_prompt", type_hint=int, default=1),
             InputParam("generator"),
             InputParam(
@@ -423,7 +427,7 @@ class ZImagePrepareLatentsStep(ModularPipelineBlocks):
         ]
 
     @property
-    def intermediate_outputs(self) -> List[OutputParam]:
+    def intermediate_outputs(self) -> list[OutputParam]:
         return [
             OutputParam(
                 "latents", type_hint=torch.Tensor, description="The initial latents to use for the denoising process"
@@ -496,7 +500,7 @@ class ZImageSetTimestepsStep(ModularPipelineBlocks):
     model_name = "z-image"
 
     @property
-    def expected_components(self) -> List[ComponentSpec]:
+    def expected_components(self) -> list[ComponentSpec]:
         return [
             ComponentSpec("scheduler", FlowMatchEulerDiscreteScheduler),
         ]
@@ -506,15 +510,15 @@ class ZImageSetTimestepsStep(ModularPipelineBlocks):
         return "Step that sets the scheduler's timesteps for inference. Need to run after prepare latents step."
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         return [
             InputParam("latents", required=True),
-            InputParam("num_inference_steps", default=9),
+            InputParam("num_inference_steps", default=8),
             InputParam("sigmas"),
         ]
 
     @property
-    def intermediate_outputs(self) -> List[OutputParam]:
+    def intermediate_outputs(self) -> list[OutputParam]:
         return [
             OutputParam(
                 "timesteps", type_hint=torch.Tensor, description="The timesteps to use for the denoising process"
@@ -536,13 +540,15 @@ class ZImageSetTimestepsStep(ModularPipelineBlocks):
             base_shift=components.scheduler.config.get("base_shift", 0.5),
             max_shift=components.scheduler.config.get("max_shift", 1.15),
         )
-        components.scheduler.sigma_min = 0.0
+        sigmas = block_state.sigmas
+        if sigmas is None:
+            sigmas = get_default_z_image_sigmas(block_state.num_inference_steps)
 
         block_state.timesteps, block_state.num_inference_steps = retrieve_timesteps(
             components.scheduler,
             block_state.num_inference_steps,
             device,
-            sigmas=block_state.sigmas,
+            sigmas=sigmas,
             mu=mu,
         )
 
@@ -554,7 +560,7 @@ class ZImageSetTimestepsWithStrengthStep(ModularPipelineBlocks):
     model_name = "z-image"
 
     @property
-    def expected_components(self) -> List[ComponentSpec]:
+    def expected_components(self) -> list[ComponentSpec]:
         return [
             ComponentSpec("scheduler", FlowMatchEulerDiscreteScheduler),
         ]
@@ -564,7 +570,7 @@ class ZImageSetTimestepsWithStrengthStep(ModularPipelineBlocks):
         return "Step that sets the scheduler's timesteps for inference with strength. Need to run after set timesteps step."
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         return [
             InputParam("timesteps", required=True),
             InputParam("num_inference_steps", required=True),
@@ -602,7 +608,7 @@ class ZImagePrepareLatentswithImageStep(ModularPipelineBlocks):
         return "step that prepares the latents with image condition, need to run after set timesteps and prepare latents step."
 
     @property
-    def inputs(self) -> List[InputParam]:
+    def inputs(self) -> list[InputParam]:
         return [
             InputParam("latents", required=True),
             InputParam("image_latents", required=True),

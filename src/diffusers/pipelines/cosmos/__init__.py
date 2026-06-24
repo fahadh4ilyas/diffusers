@@ -25,10 +25,17 @@ else:
     _import_structure["pipeline_cosmos2_5_predict"] = [
         "Cosmos2_5_PredictBasePipeline",
     ]
+    _import_structure["pipeline_cosmos2_5_transfer"] = [
+        "Cosmos2_5_TransferPipeline",
+    ]
     _import_structure["pipeline_cosmos2_text2image"] = ["Cosmos2TextToImagePipeline"]
     _import_structure["pipeline_cosmos2_video2world"] = ["Cosmos2VideoToWorldPipeline"]
     _import_structure["pipeline_cosmos_text2world"] = ["CosmosTextToWorldPipeline"]
     _import_structure["pipeline_cosmos_video2world"] = ["CosmosVideoToWorldPipeline"]
+    _import_structure["pipeline_cosmos3_omni"] = [
+        "Cosmos3OmniPipeline",
+        "CosmosActionCondition",
+    ]
 
 if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
     try:
@@ -41,8 +48,13 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_cosmos2_5_predict import (
             Cosmos2_5_PredictBasePipeline,
         )
+        from .pipeline_cosmos2_5_transfer import Cosmos2_5_TransferPipeline
         from .pipeline_cosmos2_text2image import Cosmos2TextToImagePipeline
         from .pipeline_cosmos2_video2world import Cosmos2VideoToWorldPipeline
+        from .pipeline_cosmos3_omni import (
+            Cosmos3OmniPipeline,
+            CosmosActionCondition,
+        )
         from .pipeline_cosmos_text2world import CosmosTextToWorldPipeline
         from .pipeline_cosmos_video2world import CosmosVideoToWorldPipeline
 

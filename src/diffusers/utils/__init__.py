@@ -23,6 +23,9 @@ from .constants import (
     DEFAULT_HF_PARALLEL_LOADING_WORKERS,
     DEPRECATED_REVISION_ARGS,
     DIFFUSERS_DYNAMIC_MODULE_NAME,
+    DIFFUSERS_LOAD_ID_FIELDS,
+    FLASHPACK_FILE_EXTENSION,
+    FLASHPACK_WEIGHTS_NAME,
     FLAX_WEIGHTS_NAME,
     GGUF_FILE_EXTENSION,
     HF_ENABLE_PARALLEL_LOADING,
@@ -41,7 +44,7 @@ from .constants import (
 from .deprecation_utils import _maybe_remap_transformers_class, deprecate
 from .doc_utils import replace_example_docstring
 from .dynamic_modules_utils import get_class_from_dynamic_module
-from .export_utils import export_to_gif, export_to_obj, export_to_ply, export_to_video
+from .export_utils import encode_video, export_to_gif, export_to_obj, export_to_ply, export_to_video
 from .hub_utils import (
     PushToHubMixin,
     _add_variant,
@@ -66,6 +69,7 @@ from .import_utils import (
     is_accelerate_version,
     is_aiter_available,
     is_aiter_version,
+    is_auto_round_available,
     is_av_available,
     is_better_profanity_available,
     is_bitsandbytes_available,
@@ -75,6 +79,7 @@ from .import_utils import (
     is_flash_attn_3_available,
     is_flash_attn_available,
     is_flash_attn_version,
+    is_flashpack_available,
     is_flax_available,
     is_ftfy_available,
     is_gguf_available,
@@ -84,9 +89,8 @@ from .import_utils import (
     is_hpu_available,
     is_inflect_available,
     is_invisible_watermark_available,
-    is_k_diffusion_available,
-    is_k_diffusion_version,
     is_kernels_available,
+    is_kernels_version,
     is_kornia_available,
     is_librosa_available,
     is_matplotlib_available,
@@ -98,6 +102,7 @@ from .import_utils import (
     is_opencv_available,
     is_optimum_quanto_available,
     is_optimum_quanto_version,
+    is_outlines_available,
     is_peft_available,
     is_peft_version,
     is_pytorch_retinaface_available,
@@ -110,6 +115,7 @@ from .import_utils import (
     is_timm_available,
     is_torch_available,
     is_torch_mlu_available,
+    is_torch_neuronx_available,
     is_torch_npu_available,
     is_torch_version,
     is_torch_xla_available,
@@ -119,6 +125,7 @@ from .import_utils import (
     is_torchsde_available,
     is_torchvision_available,
     is_transformers_available,
+    is_transformers_flax_compatible,
     is_transformers_version,
     is_unidecode_available,
     is_wandb_available,
@@ -130,6 +137,7 @@ from .loading_utils import get_module_from_name, get_submodule_by_name, load_ima
 from .logging import get_logger
 from .outputs import BaseOutput
 from .peft_utils import (
+    apply_lora_scale,
     check_peft_version,
     delete_adapter_layers,
     get_adapter_name,

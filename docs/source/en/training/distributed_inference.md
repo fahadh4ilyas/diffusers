@@ -111,7 +111,7 @@ if __name__ == "__main__":
 Call `torchrun` to run the inference script and use the `--nproc_per_node` argument to set the number of GPUs to use.
 
 ```bash
-torchrun run_distributed.py --nproc_per_node=2
+torchrun --nproc_per_node=2 run_distributed.py
 ```
 
 ## device_map
@@ -342,6 +342,75 @@ We ran a benchmark with Ulysess, Ring, and Unified Attention with [this script](
 | unified_balanced   | 11068.705        | 4.52        | 33.85            |
 
 From the above table, it's clear that Ulysses provides better throughput, but the number of devices it can use remains limited to the number of attention heads, a limitation that is solved by unified attention.
+
+
+### Ulysses Anything Attention
+
+The default Ulysses Attention mechanism requires that the sequence length of hidden states must be divisible by the number of devices. This imposes significant limitations on the practical application of Ulysses Attention. [Ulysses Anything Attention](https://github.com/huggingface/diffusers/pull/12996) is a variant of Ulysses Attention that supports arbitrary sequence lengths and arbitrary numbers of attention heads, thereby enhancing the versatility of Ulysses Attention in practical use.
+
+[`ContextParallelConfig`] supports Ulysses Anything Attention by specifying both `ulysses_degree` and `ulysses_anything`. Please note that Ulysses Anything Attention is not currently supported by Unified Attention. Pass the [`ContextParallelConfig`] with both `ulysses_degree` set to bigger than 1 and `ulysses_anything=True` to [`~ModelMixin.enable_parallelism`].
+
+```py
+pipeline.transformer.enable_parallelism(config=ContextParallelConfig(ulysses_degree=2, ulysses_anything=True))
+```
+
+> [!TIP] To avoid multiple forced CUDA sync caused by H2D and D2H transfers, please add the **gloo** backend in `init_process_group`. This will significantly reduce communication latency.
+
+We ran a benchmark for FLUX.1-dev with Ulysses, Ring, Unified Attention and Ulysses Anything Attention with [this script](https://github.com/huggingface/diffusers/pull/12996#issuecomment-3797695999) on a node of 4 L20 GPUs. The results are summarized as follows:
+
+| CP Backend         | Time / Iter (ms) | Steps / Sec | Peak Memory (GB) | Shape (HxW)|
+|--------------------|------------------|-------------|------------------|------------|
+| ulysses            |   281.07         |    3.56     |     37.11        | 1024x1024  |
+| ring               |   351.34         |    2.85     |     37.01        | 1024x1024  |
+| unified_balanced   |   324.37         |    3.08     |     37.16        | 1024x1024  |
+| ulysses_anything   |   280.94         |    3.56     |     37.11        | 1024x1024  |
+| ulysses            |   failed         |    failed   |     failed       | 1008x1008  |
+| ring               |   failed         |    failed   |     failed       | 1008x1008  |
+| unified_balanced   |   failed         |    failed   |     failed       | 1008x1008  |
+| ulysses_anything   |   278.40         |    3.59     |     36.99        | 1008x1008  |
+
+From the above table, it is clear that Ulysses Anything Attention offers better compatibility with arbitrary sequence lengths while maintaining the same performance as the standard Ulysses Attention.
+
+
+### Ring Anything Attention
+
+The default [Ring Attention](https://huggingface.co/papers/2310.01889) requires the sequence length of hidden states to be evenly divisible across the ring degree. [Ring Anything Attention](https://github.com/huggingface/diffusers/pull/13545#issuecomment-4302195582) is a variant of Ring Attention that supports arbitrary (non-evenly divisible) sequence lengths. It pads each rank's local KV to the global maximum sequence length, all-gathers the padded KV buffer, and slices back to each rank's true length before running attention.
+
+Ring Anything Attention is not supported by Unified Attention. Set `ring_degree > 1` and `ring_anything=True` to enable Ring Anything Attention.
+
+```py
+pipeline.transformer.enable_parallelism(config=ContextParallelConfig(ring_degree=2, ring_anything=True))
+```
+
+> [!TIP]
+> Add the `gloo` backend to [init_process_group](https://docs.pytorch.org/docs/stable/distributed.html#torch.distributed.init_process_group) to avoid multiple forced CUDA syncs from H2D and D2H transfers.
+
+```py
+import torch.distributed as dist
+
+dist.init_process_group(backend="cpu:gloo,cuda:nccl")
+```
+
+> [!NOTE]
+> Ring Anything Attention only currently supports inference and non-`None` attention masks aren't supported. `attn_mask` must be `None`.
+
+See the FLUX.1-dev benchmarks below on a node of 4 RTX 4090 (48GB) GPUs.
+
+| CP Backend         | Time / Iter (ms) | Steps / Sec | Peak Memory (GB) | Shape (HxW)|
+|--------------------|------------------|-------------|------------------|------------|
+| ulysses            |   259.07         |    3.86     |     33.83        | 1024x1024  |
+| ring               |   338.98         |    2.95     |     33.83        | 1024x1024  |
+| unified_balanced   |   321.54         |    3.11     |     33.83        | 1024x1024  |
+| ulysses_anything   |   259.07         |    3.86     |     33.83        | 1024x1024  |
+| ring_anything      |   340.14         |    2.94     |     33.83        | 1024x1024  |
+| ulysses            |   failed         |    failed   |     failed       | 1008x1008  |
+| ring               |   failed         |    failed   |     failed       | 1008x1008  |
+| unified_balanced   |   failed         |    failed   |     failed       | 1008x1008  |
+| ulysses_anything   |   253.16         |    3.95     |     33.75        | 1008x1008  |
+| ring_anything      |   335.57         |    2.98     |     33.75        | 1008x1008  |
+
+From the above table, Ring Anything Attention offers compatibility with arbitrary sequence lengths while maintaining performance comparable to the standard Ring Attention.
+For more details on the motivation and trade-offs for Ring Anything Attention, see [this comment](https://github.com/huggingface/diffusers/pull/13545#issuecomment-4304104462).
 
 ### parallel_config
 

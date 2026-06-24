@@ -12,8 +12,6 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from typing import List, Optional, Tuple, Union
-
 import torch
 
 from ....models import UNet2DModel
@@ -48,17 +46,20 @@ class ScoreSdeVePipeline(DiffusionPipeline):
         self,
         batch_size: int = 1,
         num_inference_steps: int = 2000,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        output_type: Optional[str] = "pil",
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        output_type: str | None = "pil",
         return_dict: bool = True,
         **kwargs,
-    ) -> Union[ImagePipelineOutput, Tuple]:
+    ) -> ImagePipelineOutput | tuple:
         r"""
         The call function to the pipeline for generation.
 
         Args:
             batch_size (`int`, *optional*, defaults to 1):
                 The number of images to generate.
+            num_inference_steps (`int`, *optional*, defaults to 2000):
+                The number of denoising steps. More denoising steps usually lead to a higher quality image at the
+                expense of slower inference.
             generator (`torch.Generator`, `optional`):
                 A [`torch.Generator`](https://pytorch.org/docs/stable/generated/torch.Generator.html) to make
                 generation deterministic.

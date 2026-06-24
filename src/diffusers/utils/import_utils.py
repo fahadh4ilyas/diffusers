@@ -24,7 +24,7 @@ from collections import OrderedDict, defaultdict
 from functools import lru_cache as cache
 from itertools import chain
 from types import ModuleType
-from typing import Any, Tuple, Union
+from typing import Any
 
 from huggingface_hub.utils import is_jinja_available  # noqa: F401
 from packaging.version import Version, parse
@@ -59,7 +59,7 @@ STR_OPERATION_TO_FUNC = {">": op.gt, ">=": op.ge, "==": op.eq, "!=": op.ne, "<="
 _is_google_colab = "google.colab" in sys.modules or any(k.startswith("COLAB_") for k in os.environ)
 
 
-def _is_package_available(pkg_name: str, get_dist_name: bool = False) -> Tuple[bool, str]:
+def _is_package_available(pkg_name: str, get_dist_name: bool = False) -> tuple[bool, str]:
     global _package_map
     pkg_exists = importlib.util.find_spec(pkg_name) is not None
     pkg_version = "N/A"
@@ -193,17 +193,19 @@ except importlib_metadata.PackageNotFoundError:
 _torch_xla_available, _torch_xla_version = _is_package_available("torch_xla")
 _torch_npu_available, _torch_npu_version = _is_package_available("torch_npu")
 _torch_mlu_available, _torch_mlu_version = _is_package_available("torch_mlu")
+_torch_neuronx_available, _torch_neuronx_version = _is_package_available("torch_neuronx")
 _transformers_available, _transformers_version = _is_package_available("transformers")
 _hf_hub_available, _hf_hub_version = _is_package_available("huggingface_hub")
 _kernels_available, _kernels_version = _is_package_available("kernels")
 _inflect_available, _inflect_version = _is_package_available("inflect")
 _unidecode_available, _unidecode_version = _is_package_available("unidecode")
-_k_diffusion_available, _k_diffusion_version = _is_package_available("k_diffusion")
+
 _note_seq_available, _note_seq_version = _is_package_available("note_seq")
 _wandb_available, _wandb_version = _is_package_available("wandb")
 _tensorboard_available, _tensorboard_version = _is_package_available("tensorboard")
 _compel_available, _compel_version = _is_package_available("compel")
 _sentencepiece_available, _sentencepiece_version = _is_package_available("sentencepiece")
+_outlines_available, _outlines_version = _is_package_available("outlines")
 _torchsde_available, _torchsde_version = _is_package_available("torchsde")
 _peft_available, _peft_version = _is_package_available("peft")
 _torchvision_available, _torchvision_version = _is_package_available("torchvision")
@@ -227,9 +229,11 @@ _cosmos_guardrail_available, _cosmos_guardrail_version = _is_package_available("
 _sageattention_available, _sageattention_version = _is_package_available("sageattention")
 _flash_attn_available, _flash_attn_version = _is_package_available("flash_attn")
 _flash_attn_3_available, _flash_attn_3_version = _is_package_available("flash_attn_3")
-_aiter_available, _aiter_version = _is_package_available("aiter")
+_aiter_available, _aiter_version = _is_package_available("aiter", get_dist_name=True)
 _kornia_available, _kornia_version = _is_package_available("kornia")
 _nvidia_modelopt_available, _nvidia_modelopt_version = _is_package_available("modelopt", get_dist_name=True)
+_auto_round_available, _auto_round_version = _is_package_available("auto_round")
+_flashpack_available, _flashpack_version = _is_package_available("flashpack")
 _av_available, _av_version = _is_package_available("av")
 
 
@@ -249,12 +253,32 @@ def is_torch_mlu_available():
     return _torch_mlu_available
 
 
+def is_torch_neuronx_available():
+    return _torch_neuronx_available
+
+
 def is_flax_available():
     return _flax_available
 
 
 def is_transformers_available():
     return _transformers_available
+
+
+def is_transformers_flax_compatible():
+    # Flax classes (e.g. FlaxCLIPTextModel, FlaxPreTrainedModel) were removed from
+    # transformers main on the path to its v5 release. Gate Flax pipeline registration
+    # on transformers still shipping them so `import diffusers` doesn't crash.
+    # Name avoids the `is_*_available()` pattern so utils/check_dummies.py keeps
+    # generating the `flax_and_transformers` backend group when this is combined with
+    # the legacy is_flax_available()/is_transformers_available() pair.
+    if not (_transformers_available and _flax_available):
+        return False
+    try:
+        import transformers
+    except ImportError:
+        return False
+    return hasattr(transformers, "FlaxPreTrainedModel")
 
 
 def is_inflect_available():
@@ -291,10 +315,6 @@ def is_accelerate_available():
 
 def is_kernels_available():
     return _kernels_available
-
-
-def is_k_diffusion_available():
-    return _k_diffusion_available
 
 
 def is_note_seq_available():
@@ -357,12 +377,20 @@ def is_sentencepiece_available():
     return _sentencepiece_available
 
 
+def is_outlines_available():
+    return _outlines_available
+
+
 def is_imageio_available():
     return _imageio_available
 
 
 def is_gguf_available():
     return _gguf_available
+
+
+def is_flashpack_available():
+    return _flashpack_available
 
 
 def is_torchao_available():
@@ -375,6 +403,10 @@ def is_optimum_quanto_available():
 
 def is_nvidia_modelopt_available():
     return _nvidia_modelopt_available
+
+
+def is_auto_round_available():
+    return _auto_round_available
 
 
 def is_timm_available():
@@ -477,12 +509,6 @@ install transformers`
 UNIDECODE_IMPORT_ERROR = """
 {0} requires the unidecode library but it was not found in your environment. You can install it with pip: `pip install
 Unidecode`
-"""
-
-# docstyle-ignore
-K_DIFFUSION_IMPORT_ERROR = """
-{0} requires the k-diffusion library but it was not found in your environment. You can install it with pip: `pip
-install k-diffusion`
 """
 
 # docstyle-ignore
@@ -589,6 +615,11 @@ NLTK_IMPORT_ERROR = """
 """
 
 
+TORCH_NEURONX_IMPORT_ERROR = """
+{0} requires the torch_neuronx library (AWS Neuron SDK) but it was not found in your environment. Please install it
+following the AWS Neuron documentation: https://awsdocs-neuron.readthedocs-hosted.com/en/latest/
+"""
+
 BACKENDS_MAPPING = OrderedDict(
     [
         ("bs4", (is_bs4_available, BS4_IMPORT_ERROR)),
@@ -601,7 +632,6 @@ BACKENDS_MAPPING = OrderedDict(
         ("transformers", (is_transformers_available, TRANSFORMERS_IMPORT_ERROR)),
         ("unidecode", (is_unidecode_available, UNIDECODE_IMPORT_ERROR)),
         ("librosa", (is_librosa_available, LIBROSA_IMPORT_ERROR)),
-        ("k_diffusion", (is_k_diffusion_available, K_DIFFUSION_IMPORT_ERROR)),
         ("note_seq", (is_note_seq_available, NOTE_SEQ_IMPORT_ERROR)),
         ("wandb", (is_wandb_available, WANDB_IMPORT_ERROR)),
         ("tensorboard", (is_tensorboard_available, TENSORBOARD_IMPORT_ERROR)),
@@ -620,6 +650,7 @@ BACKENDS_MAPPING = OrderedDict(
         ("pytorch_retinaface", (is_pytorch_retinaface_available, PYTORCH_RETINAFACE_IMPORT_ERROR)),
         ("better_profanity", (is_better_profanity_available, BETTER_PROFANITY_IMPORT_ERROR)),
         ("nltk", (is_nltk_available, NLTK_IMPORT_ERROR)),
+        ("torch_neuronx", (is_torch_neuronx_available, TORCH_NEURONX_IMPORT_ERROR)),
     ]
 )
 
@@ -668,7 +699,7 @@ class DummyObject(type):
 
 
 # This function was copied from: https://github.com/huggingface/accelerate/blob/874c4967d94badd24f893064cc3bef45f57cadf7/src/accelerate/utils/versions.py#L319
-def compare_versions(library_or_version: Union[str, Version], operation: str, requirement_version: str):
+def compare_versions(library_or_version: str | Version, operation: str, requirement_version: str):
     """
     Compares a library version to some requirement using a given operation.
 
@@ -733,6 +764,22 @@ def is_transformers_version(operation: str, version: str):
     if not _transformers_available:
         return False
     return compare_versions(parse(_transformers_version), operation, version)
+
+
+@cache
+def is_kernels_version(operation: str, version: str):
+    """
+    Compares the current Kernels version to a given reference with an operation.
+
+    Args:
+        operation (`str`):
+            A string representation of an operator, such as `">"` or `"<="`
+        version (`str`):
+            A version string
+    """
+    if not _kernels_available:
+        return False
+    return compare_versions(parse(_kernels_version), operation, version)
 
 
 @cache
@@ -828,22 +875,6 @@ def is_torchao_version(operation: str, version: str):
     if not _torchao_available:
         return False
     return compare_versions(parse(_torchao_version), operation, version)
-
-
-@cache
-def is_k_diffusion_version(operation: str, version: str):
-    """
-    Compares the current k-diffusion version to a given reference with an operation.
-
-    Args:
-        operation (`str`):
-            A string representation of an operator, such as `">"` or `"<="`
-        version (`str`):
-            A version string
-    """
-    if not _k_diffusion_available:
-        return False
-    return compare_versions(parse(_k_diffusion_version), operation, version)
 
 
 @cache

@@ -16,7 +16,7 @@ Adapted from
 https://github.com/huggingface/transformers/blob/c409cd81777fb27aadc043ed3d8339dbc020fb3b/src/transformers/quantizers/quantizer_bnb_4bit.py
 """
 
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any
 
 from ...utils import get_module_from_name
 from ..base import DiffusersQuantizer
@@ -61,7 +61,7 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
             self.modules_to_not_convert = self.quantization_config.llm_int8_skip_modules
 
     def validate_environment(self, *args, **kwargs):
-        if not (torch.cuda.is_available() or torch.xpu.is_available()):
+        if not (torch.cuda.is_available() or torch.xpu.is_available() or torch.mps.is_available()):
             raise RuntimeError("No GPU found. A GPU is needed for quantization.")
         if not is_accelerate_available() or is_accelerate_version("<", "0.26.0"):
             raise ImportError(
@@ -111,7 +111,7 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
         model: "ModelMixin",
         param_value: "torch.Tensor",
         param_name: str,
-        state_dict: Dict[str, Any],
+        state_dict: dict[str, Any],
         **kwargs,
     ) -> bool:
         import bitsandbytes as bnb
@@ -133,8 +133,8 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
         param_value: "torch.Tensor",
         param_name: str,
         target_device: "torch.device",
-        state_dict: Dict[str, Any],
-        unexpected_keys: Optional[List[str]] = None,
+        state_dict: dict[str, Any],
+        unexpected_keys: list[str] | None = None,
         **kwargs,
     ):
         import bitsandbytes as bnb
@@ -218,7 +218,7 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
         else:
             return True
 
-    def adjust_max_memory(self, max_memory: Dict[str, Union[int, str]]) -> Dict[str, Union[int, str]]:
+    def adjust_max_memory(self, max_memory: dict[str, int | str]) -> dict[str, int | str]:
         # need more space for buffers that are created during quantization
         max_memory = {key: val * 0.90 for key, val in max_memory.items()}
         return max_memory
@@ -240,6 +240,8 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
         if device_map is None:
             if torch.xpu.is_available():
                 current_device = f"xpu:{torch.xpu.current_device()}"
+            elif torch.mps.is_available():
+                current_device = "mps"
             else:
                 current_device = f"cuda:{torch.cuda.current_device()}"
             device_map = {"": current_device}
@@ -255,7 +257,7 @@ class BnB4BitDiffusersQuantizer(DiffusersQuantizer):
         self,
         model: "ModelMixin",
         device_map,
-        keep_in_fp32_modules: List[str] = [],
+        keep_in_fp32_modules: list[str] = [],
         **kwargs,
     ):
         from .utils import replace_with_bnb_linear
@@ -387,7 +389,7 @@ class BnB8BitDiffusersQuantizer(DiffusersQuantizer):
                 )
 
     # Copied from diffusers.quantizers.bitsandbytes.bnb_quantizer.BnB4BitDiffusersQuantizer.adjust_max_memory
-    def adjust_max_memory(self, max_memory: Dict[str, Union[int, str]]) -> Dict[str, Union[int, str]]:
+    def adjust_max_memory(self, max_memory: dict[str, int | str]) -> dict[str, int | str]:
         # need more space for buffers that are created during quantization
         max_memory = {key: val * 0.90 for key, val in max_memory.items()}
         return max_memory
@@ -411,6 +413,8 @@ class BnB8BitDiffusersQuantizer(DiffusersQuantizer):
         if device_map is None:
             if torch.xpu.is_available():
                 current_device = f"xpu:{torch.xpu.current_device()}"
+            elif torch.mps.is_available():
+                current_device = "mps"
             else:
                 current_device = f"cuda:{torch.cuda.current_device()}"
             device_map = {"": current_device}
@@ -432,7 +436,7 @@ class BnB8BitDiffusersQuantizer(DiffusersQuantizer):
         model: "ModelMixin",
         param_value: "torch.Tensor",
         param_name: str,
-        state_dict: Dict[str, Any],
+        state_dict: dict[str, Any],
         **kwargs,
     ):
         import bitsandbytes as bnb
@@ -455,8 +459,8 @@ class BnB8BitDiffusersQuantizer(DiffusersQuantizer):
         param_value: "torch.Tensor",
         param_name: str,
         target_device: "torch.device",
-        state_dict: Dict[str, Any],
-        unexpected_keys: Optional[List[str]] = None,
+        state_dict: dict[str, Any],
+        unexpected_keys: list[str] | None = None,
         **kwargs,
     ):
         import bitsandbytes as bnb
@@ -513,7 +517,7 @@ class BnB8BitDiffusersQuantizer(DiffusersQuantizer):
         self,
         model: "ModelMixin",
         device_map,
-        keep_in_fp32_modules: List[str] = [],
+        keep_in_fp32_modules: list[str] = [],
         **kwargs,
     ):
         from .utils import replace_with_bnb_linear

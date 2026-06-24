@@ -15,14 +15,17 @@ import importlib
 import inspect
 import re
 from contextlib import nullcontext
-from typing import Optional
 
 import torch
 from huggingface_hub.utils import validate_hf_hub_args
 from typing_extensions import Self
 
 from .. import __version__
-from ..models.model_loading_utils import _caching_allocator_warmup, _determine_device_map, _expand_device_map
+from ..models.model_loading_utils import (
+    _caching_allocator_warmup,
+    _determine_device_map,
+    _expand_device_map,
+)
 from ..quantizers import DiffusersAutoQuantizer
 from ..utils import deprecate, is_accelerate_available, is_torch_version, logging
 from ..utils.torch_utils import empty_device_cache
@@ -34,6 +37,7 @@ from .single_file_utils import (
     convert_chroma_transformer_checkpoint_to_diffusers,
     convert_controlnet_checkpoint,
     convert_cosmos_transformer_checkpoint_to_diffusers,
+    convert_ernie_image_transformer_checkpoint_to_diffusers,
     convert_flux2_transformer_checkpoint_to_diffusers,
     convert_flux_transformer_checkpoint_to_diffusers,
     convert_hidream_transformer_to_diffusers,
@@ -115,6 +119,10 @@ SINGLE_FILE_LOADABLE_CLASSES = {
         "checkpoint_mapping_fn": convert_chroma_transformer_checkpoint_to_diffusers,
         "default_subfolder": "transformer",
     },
+    "ErnieImageTransformer2DModel": {
+        "checkpoint_mapping_fn": convert_ernie_image_transformer_checkpoint_to_diffusers,
+        "default_subfolder": "transformer",
+    },
     "LTXVideoTransformer3DModel": {
         "checkpoint_mapping_fn": convert_ltx_transformer_checkpoint_to_diffusers,
         "default_subfolder": "transformer",
@@ -149,6 +157,10 @@ SINGLE_FILE_LOADABLE_CLASSES = {
         "default_subfolder": "transformer",
     },
     "WanVACETransformer3DModel": {
+        "checkpoint_mapping_fn": convert_wan_transformer_to_diffusers,
+        "default_subfolder": "transformer",
+    },
+    "WanAnimateTransformer3DModel": {
         "checkpoint_mapping_fn": convert_wan_transformer_to_diffusers,
         "default_subfolder": "transformer",
     },
@@ -191,6 +203,10 @@ SINGLE_FILE_LOADABLE_CLASSES = {
         "checkpoint_mapping_fn": convert_ltx2_audio_vae_to_diffusers,
         "default_subfolder": "audio_vae",
     },
+    "MotifVideoTransformer3DModel": {
+        "checkpoint_mapping_fn": lambda checkpoint, **kwargs: checkpoint,
+        "default_subfolder": "transformer",
+    },
 }
 
 
@@ -231,7 +247,7 @@ class FromOriginalModelMixin:
 
     @classmethod
     @validate_hf_hub_args
-    def from_single_file(cls, pretrained_model_link_or_path_or_dict: Optional[str] = None, **kwargs) -> Self:
+    def from_single_file(cls, pretrained_model_link_or_path_or_dict: str | None = None, **kwargs) -> Self:
         r"""
         Instantiate a model from pretrained weights saved in the original `.ckpt` or `.safetensors` format. The model
         is set in evaluation mode (`model.eval()`) by default.
@@ -258,11 +274,11 @@ class FromOriginalModelMixin:
             force_download (`bool`, *optional*, defaults to `False`):
                 Whether or not to force the (re-)download of the model weights and configuration files, overriding the
                 cached versions if they exist.
-            cache_dir (`Union[str, os.PathLike]`, *optional*):
+            cache_dir (`str | os.PathLike`, *optional*):
                 Path to a directory where a downloaded pretrained model configuration is cached if the standard cache
                 is not used.
 
-            proxies (`Dict[str, str]`, *optional*):
+            proxies (`dict[str, str]`, *optional*):
                 A dictionary of proxy servers to use by protocol or endpoint, for example, `{'http': 'foo.bar:3128',
                 'http://hostname': 'foo.bar:4012'}`. The proxies are used on each request.
             local_files_only (`bool`, *optional*, defaults to `False`):
@@ -333,7 +349,11 @@ class FromOriginalModelMixin:
         disable_mmap = kwargs.pop("disable_mmap", False)
         device_map = kwargs.pop("device_map", None)
 
-        user_agent = {"diffusers": __version__, "file_type": "single_file", "framework": "pytorch"}
+        user_agent = {
+            "diffusers": __version__,
+            "file_type": "single_file",
+            "framework": "pytorch",
+        }
         # In order to ensure popular quantization methods are supported. Can be disable with `disable_telemetry`
         if quantization_config is not None:
             user_agent["quant"] = quantization_config.quant_method.value
@@ -390,7 +410,9 @@ class FromOriginalModelMixin:
 
             config_mapping_kwargs = _get_mapping_function_kwargs(config_mapping_fn, **kwargs)
             diffusers_model_config = config_mapping_fn(
-                original_config=original_config, checkpoint=checkpoint, **config_mapping_kwargs
+                original_config=original_config,
+                checkpoint=checkpoint,
+                **config_mapping_kwargs,
             )
         else:
             if config is not None:
@@ -462,7 +484,9 @@ class FromOriginalModelMixin:
 
         if _should_convert_state_dict_to_diffusers(model_state_dict, checkpoint):
             diffusers_format_checkpoint = checkpoint_mapping_fn(
-                config=diffusers_model_config, checkpoint=checkpoint, **checkpoint_mapping_kwargs
+                config=diffusers_model_config,
+                checkpoint=checkpoint,
+                **checkpoint_mapping_kwargs,
             )
         else:
             diffusers_format_checkpoint = checkpoint

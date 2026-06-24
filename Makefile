@@ -1,4 +1,4 @@
-.PHONY: deps_table_update modified_only_fixup extra_style_checks quality style fixup fix-copies test test-examples
+.PHONY: deps_table_update modified_only_fixup extra_style_checks quality style fixup fix-copies test test-examples codex claude clean-ai
 
 # make sure to test the local checkout in scripts and not the pre-installed one (don't use quotes!)
 export PYTHONPATH = src
@@ -36,6 +36,7 @@ repo-consistency:
 	python utils/check_dummies.py
 	python utils/check_repo.py
 	python utils/check_inits.py
+	python utils/check_forward_call_docstrings.py
 
 # this target runs checks on all files
 
@@ -70,6 +71,14 @@ fix-copies:
 	python utils/check_copies.py --fix_and_overwrite
 	python utils/check_dummies.py --fix_and_overwrite
 
+# Auto docstrings in modular blocks
+modular-autodoctrings:
+	python utils/modular_auto_docstring.py
+
+# Verify forward() / __call__() arguments are documented in their docstrings
+check-forward-call-docstrings:
+	python utils/check_forward_call_docstrings.py
+
 # Run tests for the library
 
 test:
@@ -94,3 +103,18 @@ post-release:
 
 post-patch:
 	python utils/release.py --post_release --patch
+
+# AI agent symlinks
+
+codex:
+	mkdir -p .agents
+	rm -rf .agents/skills
+	ln -snf ../.ai/skills .agents/skills
+
+claude:
+	mkdir -p .claude
+	rm -rf .claude/skills
+	ln -snf ../.ai/skills .claude/skills
+
+clean-ai:
+	rm -rf .agents/skills .claude/skills

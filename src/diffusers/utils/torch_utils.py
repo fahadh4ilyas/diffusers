@@ -15,24 +15,44 @@
 PyTorch utilities: Utilities related to PyTorch
 """
 
+from __future__ import annotations
+
 import functools
 import os
-from typing import Callable, Dict, List, Optional, Tuple, Union
+from typing import Callable, ParamSpec, TypeVar
 
 from . import logging
-from .import_utils import is_torch_available, is_torch_mlu_available, is_torch_npu_available, is_torch_version
+from .import_utils import (
+    is_torch_available,
+    is_torch_mlu_available,
+    is_torch_neuronx_available,
+    is_torch_npu_available,
+    is_torch_version,
+)
+
+
+T = TypeVar("T")
+P = ParamSpec("P")
 
 
 if is_torch_available():
     import torch
     from torch.fft import fftn, fftshift, ifftn, ifftshift
 
-    BACKEND_SUPPORTS_TRAINING = {"cuda": True, "xpu": True, "cpu": True, "mps": False, "default": True}
+    BACKEND_SUPPORTS_TRAINING = {
+        "cuda": True,
+        "xpu": True,
+        "cpu": True,
+        "mps": False,
+        "neuron": False,
+        "default": True,
+    }
     BACKEND_EMPTY_CACHE = {
         "cuda": torch.cuda.empty_cache,
         "xpu": torch.xpu.empty_cache,
         "cpu": None,
         "mps": torch.mps.empty_cache,
+        "neuron": None,
         "default": None,
     }
     BACKEND_DEVICE_COUNT = {
@@ -40,6 +60,7 @@ if is_torch_available():
         "xpu": torch.xpu.device_count,
         "cpu": lambda: 0,
         "mps": lambda: 0,
+        "neuron": lambda: getattr(getattr(torch, "neuron", None), "device_count", lambda: 0)(),
         "default": 0,
     }
     BACKEND_MANUAL_SEED = {
@@ -47,6 +68,7 @@ if is_torch_available():
         "xpu": torch.xpu.manual_seed,
         "cpu": torch.manual_seed,
         "mps": torch.mps.manual_seed,
+        "neuron": torch.manual_seed,
         "default": torch.manual_seed,
     }
     BACKEND_RESET_PEAK_MEMORY_STATS = {
@@ -54,6 +76,7 @@ if is_torch_available():
         "xpu": getattr(torch.xpu, "reset_peak_memory_stats", None),
         "cpu": None,
         "mps": None,
+        "neuron": None,
         "default": None,
     }
     BACKEND_RESET_MAX_MEMORY_ALLOCATED = {
@@ -61,6 +84,7 @@ if is_torch_available():
         "xpu": getattr(torch.xpu, "reset_peak_memory_stats", None),
         "cpu": None,
         "mps": None,
+        "neuron": None,
         "default": None,
     }
     BACKEND_MAX_MEMORY_ALLOCATED = {
@@ -68,6 +92,7 @@ if is_torch_available():
         "xpu": getattr(torch.xpu, "max_memory_allocated", None),
         "cpu": 0,
         "mps": 0,
+        "neuron": 0,
         "default": 0,
     }
     BACKEND_SYNCHRONIZE = {
@@ -75,8 +100,15 @@ if is_torch_available():
         "xpu": getattr(torch.xpu, "synchronize", None),
         "cpu": None,
         "mps": None,
+        "neuron": getattr(getattr(torch, "neuron", None), "synchronize", None),
         "default": None,
     }
+
+    _FP64_UNSUPPORTED_DEVICES = frozenset({"mps", "npu", "neuron"})
+    _INT64_UNSUPPORTED_DEVICES = frozenset({"mps", "npu", "neuron"})
+    _DTYPE_DOWNCAST = {torch.float64: torch.float32, torch.int64: torch.int32}
+    _DTYPE_UNSUPPORTED_DEVICES = {torch.float64: _FP64_UNSUPPORTED_DEVICES, torch.int64: _INT64_UNSUPPORTED_DEVICES}
+
 logger = logging.get_logger(__name__)  # pylint: disable=invalid-name
 
 try:
@@ -88,7 +120,7 @@ except (ImportError, ModuleNotFoundError):
 
 
 # This dispatches a defined function according to the accelerator from the function definitions.
-def _device_agnostic_dispatch(device: str, dispatch_table: Dict[str, Callable], *args, **kwargs):
+def _device_agnostic_dispatch(device: str, dispatch_table: dict[str, callable], *args, **kwargs):
     if device not in dispatch_table:
         return dispatch_table["default"](*args, **kwargs)
 
@@ -143,12 +175,17 @@ def backend_supports_training(device: str):
     return BACKEND_SUPPORTS_TRAINING[device]
 
 
+def maybe_adjust_dtype_for_device(dtype: "torch.dtype", device: "torch.device") -> "torch.dtype":
+    unsupported = _DTYPE_UNSUPPORTED_DEVICES.get(dtype)
+    return _DTYPE_DOWNCAST[dtype] if unsupported and device.type in unsupported else dtype
+
+
 def randn_tensor(
-    shape: Union[Tuple, List],
-    generator: Optional[Union[List["torch.Generator"], "torch.Generator"]] = None,
-    device: Optional[Union[str, "torch.device"]] = None,
-    dtype: Optional["torch.dtype"] = None,
-    layout: Optional["torch.layout"] = None,
+    shape: tuple | list,
+    generator: list["torch.Generator"] | "torch.Generator" | None = None,
+    device: str | "torch.device" | None = None,
+    dtype: "torch.dtype" | None = None,
+    layout: "torch.layout" | None = None,
 ):
     """A helper function to create random tensors on the desired `device` with the desired `dtype`. When
     passing a list of generators, you can seed each batch size individually. If CPU generators are passed, the tensor
@@ -163,11 +200,15 @@ def randn_tensor(
     layout = layout or torch.strided
     device = device or torch.device("cpu")
 
+    # Neuron (XLA) does not support creating random tensors directly on device; always use CPU
+    if device.type == "neuron":
+        rand_device = torch.device("cpu")
+
     if generator is not None:
         gen_device_type = generator.device.type if not isinstance(generator, list) else generator[0].device.type
         if gen_device_type != device.type and gen_device_type == "cpu":
             rand_device = "cpu"
-            if device != "mps":
+            if device.type not in ("mps", "neuron"):
                 logger.info(
                     f"The passed generator was created on 'cpu' even though a tensor on {device} was expected."
                     f" Tensors will be created on 'cpu' and then moved to {device}. Note that one can probably"
@@ -217,8 +258,10 @@ def fourier_filter(x_in: "torch.Tensor", threshold: int, scale: int) -> "torch.T
     # Non-power of 2 images must be float32
     if (W & (W - 1)) != 0 or (H & (H - 1)) != 0:
         x = x.to(dtype=torch.float32)
-    # fftn does not support bfloat16
-    elif x.dtype == torch.bfloat16:
+    # fftn does not support bfloat16, and produces the experimental ComplexHalf
+    # dtype (torch.complex32) when given float16, which is numerically unstable
+    # and triggers a UserWarning. Upcast any non-float32 dtype to float32.
+    elif x.dtype != torch.float32:
         x = x.to(dtype=torch.float32)
 
     # FFT
@@ -241,9 +284,9 @@ def fourier_filter(x_in: "torch.Tensor", threshold: int, scale: int) -> "torch.T
 
 def apply_freeu(
     resolution_idx: int, hidden_states: "torch.Tensor", res_hidden_states: "torch.Tensor", **freeu_kwargs
-) -> Tuple["torch.Tensor", "torch.Tensor"]:
-    """Applies the FreeU mechanism as introduced in https://huggingface.co/papers/2309.11497. Adapted from the official
-    code repository: https://github.com/ChenyangSi/FreeU.
+) -> tuple["torch.Tensor", "torch.Tensor"]:
+    """Applies the FreeU mechanism as introduced in https:
+    //arxiv.org/abs/2309.11497. Adapted from the official code repository: https://github.com/ChenyangSi/FreeU.
 
     Args:
         resolution_idx (`int`): Integer denoting the UNet block where FreeU is being applied.
@@ -288,11 +331,13 @@ def get_device():
         return "mps"
     elif is_torch_mlu_available():
         return "mlu"
+    elif is_torch_neuronx_available() and hasattr(torch, "neuron") and torch.neuron.is_available():
+        return "neuron"
     else:
         return "cpu"
 
 
-def empty_device_cache(device_type: Optional[str] = None):
+def empty_device_cache(device_type: str | None = None):
     if device_type is None:
         device_type = get_device()
     if device_type in ["cpu"]:
@@ -301,7 +346,7 @@ def empty_device_cache(device_type: Optional[str] = None):
     device_mod.empty_cache()
 
 
-def device_synchronize(device_type: Optional[str] = None):
+def device_synchronize(device_type: str | None = None):
     if device_type is None:
         device_type = get_device()
     device_mod = getattr(torch, device_type, torch.cuda)
@@ -330,6 +375,34 @@ def disable_full_determinism():
     os.environ["CUDA_LAUNCH_BLOCKING"] = "0"
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ""
     torch.use_deterministic_algorithms(False)
+
+
+@functools.wraps(functools.lru_cache)
+def lru_cache_unless_export(maxsize=128, typed=False):
+    def outer_wrapper(fn: Callable[P, T]):
+        cached = functools.lru_cache(maxsize=maxsize, typed=typed)(fn)
+        if is_torch_version("<", "2.7.0"):
+            return cached
+
+        @functools.wraps(fn)
+        def inner_wrapper(*args: P.args, **kwargs: P.kwargs):
+            compiler = getattr(torch, "compiler", None)
+            is_exporting = bool(compiler and hasattr(compiler, "is_exporting") and compiler.is_exporting())
+            is_compiling = bool(compiler and hasattr(compiler, "is_compiling") and compiler.is_compiling())
+
+            # Fallback for older builds where compiler.is_compiling is unavailable.
+            if not is_compiling:
+                dynamo = getattr(torch, "_dynamo", None)
+                if dynamo is not None and hasattr(dynamo, "is_compiling"):
+                    is_compiling = dynamo.is_compiling()
+
+            if is_exporting or is_compiling:
+                return fn(*args, **kwargs)
+            return cached(*args, **kwargs)
+
+        return inner_wrapper
+
+    return outer_wrapper
 
 
 if is_torch_available():

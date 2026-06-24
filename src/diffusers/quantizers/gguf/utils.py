@@ -79,7 +79,8 @@ MMQ_QUANT_TYPES = STANDARD_QUANT_TYPES | KQUANT_TYPES
 def _fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
     # there is no need to call any kernel for fp16/bf16
     if qweight_type in UNQUANTIZED_TYPES:
-        return x @ qweight.T
+        weight = dequantize_gguf_tensor(qweight)
+        return x @ weight.to(x.dtype).T
 
     # TODO(Isotr0py): GGUF's MMQ and MMVQ implementation are designed for
     # contiguous batching and inefficient with diffusers' batching,
@@ -133,6 +134,8 @@ def _replace_with_gguf_linear(model, compute_dtype, state_dict, prefix="", modul
         return
 
     for name, module in model.named_children():
+        if name in modules_to_not_convert:
+            continue
         module_prefix = prefix + name + "."
         _replace_with_gguf_linear(module, compute_dtype, state_dict, module_prefix, modules_to_not_convert)
 
@@ -515,6 +518,9 @@ def dequantize_gguf_tensor(tensor):
 
     block_size, type_size = GGML_QUANT_SIZES[quant_type]
 
+    # Conver to plain tensor to avoid unnecessary __torch_function__ overhead.
+    tensor = tensor.as_tensor()
+
     tensor = tensor.view(torch.uint8)
     shape = _quant_shape_from_byte_shape(tensor.shape, type_size, block_size)
 
@@ -524,7 +530,7 @@ def dequantize_gguf_tensor(tensor):
     dequant = dequant_fn(blocks, block_size, type_size)
     dequant = dequant.reshape(shape)
 
-    return dequant.as_tensor()
+    return dequant
 
 
 class GGUFParameter(torch.nn.Parameter):

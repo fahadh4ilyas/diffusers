@@ -3,7 +3,7 @@ import unittest
 
 import numpy as np
 import torch
-from transformers import AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
+from transformers import AutoConfig, AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
 
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxImg2ImgPipeline, FluxTransformer2DModel
 
@@ -55,7 +55,8 @@ class FluxImg2ImgPipelineFastTests(unittest.TestCase, PipelineTesterMixin, FluxI
         text_encoder = CLIPTextModel(clip_text_encoder_config)
 
         torch.manual_seed(0)
-        text_encoder_2 = T5EncoderModel.from_pretrained("hf-internal-testing/tiny-random-t5")
+        config = AutoConfig.from_pretrained("hf-internal-testing/tiny-random-t5")
+        text_encoder_2 = T5EncoderModel(config)
 
         tokenizer = CLIPTokenizer.from_pretrained("hf-internal-testing/tiny-random-clip")
         tokenizer_2 = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-t5")
@@ -125,6 +126,34 @@ class FluxImg2ImgPipelineFastTests(unittest.TestCase, PipelineTesterMixin, FluxI
         # Outputs should be different here
         # For some reasons, they don't show large differences
         assert max_diff > 1e-6
+
+    def test_flux_true_cfg_with_negative_embeds(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+        inputs = self.get_dummy_inputs(torch_device)
+        inputs.pop("generator")
+        prompt = inputs.pop("prompt")
+
+        prompt_embeds, pooled_prompt_embeds, _ = pipe.encode_prompt(
+            prompt=prompt, prompt_2=None, device=torch_device, num_images_per_prompt=1, max_sequence_length=48
+        )
+        negative_prompt_embeds, negative_pooled_prompt_embeds, _ = pipe.encode_prompt(
+            prompt="bad quality", prompt_2=None, device=torch_device, num_images_per_prompt=1, max_sequence_length=48
+        )
+        inputs.update(
+            prompt_embeds=prompt_embeds,
+            pooled_prompt_embeds=pooled_prompt_embeds,
+            negative_prompt_embeds=negative_prompt_embeds,
+            negative_pooled_prompt_embeds=negative_pooled_prompt_embeds,
+        )
+
+        inputs["true_cfg_scale"] = 1.0
+        cfg_off = pipe(**inputs, generator=torch.manual_seed(0)).images[0]
+        inputs["true_cfg_scale"] = 2.0
+        cfg_on = pipe(**inputs, generator=torch.manual_seed(0)).images[0]
+        self.assertFalse(
+            np.allclose(cfg_off, cfg_on),
+            "Precomputed negative embeds should enable true CFG when negative_prompt is None.",
+        )
 
     def test_flux_image_output_shape(self):
         pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)

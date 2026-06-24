@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import torch
 from huggingface_hub import hf_hub_download
-from transformers import AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
+from transformers import AutoConfig, AutoTokenizer, CLIPTextConfig, CLIPTextModel, CLIPTokenizer, T5EncoderModel
 
 from diffusers import (
     AutoencoderKL,
@@ -27,6 +27,7 @@ from ..test_pipelines_common import (
     FasterCacheTesterMixin,
     FirstBlockCacheTesterMixin,
     FluxIPAdapterTesterMixin,
+    MagCacheTesterMixin,
     PipelineTesterMixin,
     PyramidAttentionBroadcastTesterMixin,
     TaylorSeerCacheTesterMixin,
@@ -41,6 +42,7 @@ class FluxPipelineFastTests(
     FasterCacheTesterMixin,
     FirstBlockCacheTesterMixin,
     TaylorSeerCacheTesterMixin,
+    MagCacheTesterMixin,
     unittest.TestCase,
 ):
     pipeline_class = FluxPipeline
@@ -91,7 +93,8 @@ class FluxPipelineFastTests(
         text_encoder = CLIPTextModel(clip_text_encoder_config)
 
         torch.manual_seed(0)
-        text_encoder_2 = T5EncoderModel.from_pretrained("hf-internal-testing/tiny-random-t5")
+        config = AutoConfig.from_pretrained("hf-internal-testing/tiny-random-t5")
+        text_encoder_2 = T5EncoderModel(config)
 
         tokenizer = CLIPTokenizer.from_pretrained("hf-internal-testing/tiny-random-clip")
         tokenizer_2 = AutoTokenizer.from_pretrained("hf-internal-testing/tiny-random-t5")
@@ -230,6 +233,25 @@ class FluxPipelineFastTests(
         self.assertFalse(
             np.allclose(no_true_cfg_out, true_cfg_out), "Outputs should be different when true_cfg_scale is set."
         )
+
+    def test_flux_negative_embeds_shape_check(self):
+        pipe = self.pipeline_class(**self.get_dummy_components()).to(torch_device)
+
+        base_inputs = {
+            "prompt_embeds": torch.randn(1, 4, 32, device=torch_device),
+            "pooled_prompt_embeds": torch.randn(1, 32, device=torch_device),
+            "negative_prompt_embeds": torch.randn(1, 5, 32, device=torch_device),
+            "negative_pooled_prompt_embeds": torch.randn(1, 32, device=torch_device),
+            "height": 16,
+            "width": 16,
+            "num_inference_steps": 1,
+            "output_type": "latent",
+        }
+
+        with self.assertRaisesRegex(ValueError, "must have the same shape when passed directly"):
+            pipe(**base_inputs, true_cfg_scale=2.0, generator=torch.manual_seed(0))
+
+        pipe(**base_inputs, true_cfg_scale=1.0, generator=torch.manual_seed(0))
 
 
 @nightly

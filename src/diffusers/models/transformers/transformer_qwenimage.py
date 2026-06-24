@@ -12,10 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-import functools
 import math
 from math import prod
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -24,8 +23,8 @@ import torch.nn.functional as F
 
 from ...configuration_utils import ConfigMixin, register_to_config
 from ...loaders import FromOriginalModelMixin, PeftAdapterMixin
-from ...utils import USE_PEFT_BACKEND, deprecate, logging, scale_lora_layers, unscale_lora_layers
-from ...utils.torch_utils import maybe_allow_in_graph
+from ...utils import apply_lora_scale, logging
+from ...utils.torch_utils import lru_cache_unless_export, maybe_allow_in_graph
 from .._modeling_parallel import ContextParallelInput, ContextParallelOutput
 from ..attention import AttentionMixin, FeedForward
 from ..attention_dispatch import dispatch_attention_fn
@@ -96,10 +95,10 @@ def get_timestep_embedding(
 
 def apply_rotary_emb_qwen(
     x: torch.Tensor,
-    freqs_cis: Union[torch.Tensor, Tuple[torch.Tensor]],
+    freqs_cis: torch.Tensor | tuple[torch.Tensor],
     use_real: bool = True,
     use_real_unbind_dim: int = -1,
-) -> Tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply rotary embeddings to input tensors using the given frequency tensor. This function applies rotary embeddings
     to the given query or key 'x' tensors using the provided frequency tensor 'freqs_cis'. The input tensors are
@@ -109,10 +108,10 @@ def apply_rotary_emb_qwen(
     Args:
         x (`torch.Tensor`):
             Query or key tensor to apply rotary embeddings. [B, S, H, D] xk (torch.Tensor): Key tensor to apply
-        freqs_cis (`Tuple[torch.Tensor]`): Precomputed frequency tensor for complex exponentials. ([S, D], [S, D],)
+        freqs_cis (`tuple[torch.Tensor]`): Precomputed frequency tensor for complex exponentials. ([S, D], [S, D],)
 
     Returns:
-        Tuple[torch.Tensor, torch.Tensor]: Tuple of modified query tensor and key tensor with rotary embeddings.
+        tuple[torch.Tensor, torch.Tensor]: tuple of modified query tensor and key tensor with rotary embeddings.
     """
     if use_real:
         cos, sin = freqs_cis  # [S, D]
@@ -143,8 +142,8 @@ def apply_rotary_emb_qwen(
 
 
 def compute_text_seq_len_from_mask(
-    encoder_hidden_states: torch.Tensor, encoder_hidden_states_mask: Optional[torch.Tensor]
-) -> Tuple[int, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    encoder_hidden_states: torch.Tensor, encoder_hidden_states_mask: torch.Tensor | None
+) -> tuple[int, torch.Tensor | None, torch.Tensor | None]:
     """
     Compute text sequence length without assuming contiguous masks. Returns length for RoPE and a normalized bool mask.
     """
@@ -164,7 +163,11 @@ def compute_text_seq_len_from_mask(
     position_ids = torch.arange(text_seq_len, device=encoder_hidden_states.device, dtype=torch.long)
     active_positions = torch.where(encoder_hidden_states_mask, position_ids, position_ids.new_zeros(()))
     has_active = encoder_hidden_states_mask.any(dim=1)
-    per_sample_len = torch.where(has_active, active_positions.max(dim=1).values + 1, torch.as_tensor(text_seq_len))
+    per_sample_len = torch.where(
+        has_active,
+        active_positions.max(dim=1).values + 1,
+        torch.as_tensor(text_seq_len, device=encoder_hidden_states.device),
+    )
     return text_seq_len, per_sample_len, encoder_hidden_states_mask
 
 
@@ -194,7 +197,7 @@ class QwenTimestepProjEmbeddings(nn.Module):
 
 
 class QwenEmbedRope(nn.Module):
-    def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
+    def __init__(self, theta: int, axes_dim: list[int], scale_rope=False):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -230,41 +233,29 @@ class QwenEmbedRope(nn.Module):
         freqs = torch.polar(torch.ones_like(freqs), freqs)
         return freqs
 
+    @lru_cache_unless_export(maxsize=None)
+    def _get_device_freqs(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return pos_freqs and neg_freqs on the given device."""
+        return self.pos_freqs.to(device), self.neg_freqs.to(device)
+
     def forward(
         self,
-        video_fhw: Union[Tuple[int, int, int], List[Tuple[int, int, int]]],
-        txt_seq_lens: Optional[List[int]] = None,
+        video_fhw: tuple[int, int, int, list[tuple[int, int, int]]],
         device: torch.device = None,
-        max_txt_seq_len: Optional[Union[int, torch.Tensor]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        max_txt_seq_len: int | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            video_fhw (`Tuple[int, int, int]` or `List[Tuple[int, int, int]]`):
+            video_fhw (`tuple[int, int, int]` or `list[tuple[int, int, int]]`):
                 A list of 3 integers [frame, height, width] representing the shape of the video.
-            txt_seq_lens (`List[int]`, *optional*, **Deprecated**):
-                Deprecated parameter. Use `max_txt_seq_len` instead. If provided, the maximum value will be used.
             device: (`torch.device`, *optional*):
                 The device on which to perform the RoPE computation.
             max_txt_seq_len (`int` or `torch.Tensor`, *optional*):
                 The maximum text sequence length for RoPE computation. This should match the encoder hidden states
                 sequence length. Can be either an int or a scalar tensor (for torch.compile compatibility).
         """
-        # Handle deprecated txt_seq_lens parameter
-        if txt_seq_lens is not None:
-            deprecate(
-                "txt_seq_lens",
-                "0.39.0",
-                "Passing `txt_seq_lens` is deprecated and will be removed in version 0.39.0. "
-                "Please use `max_txt_seq_len` instead. "
-                "The new parameter accepts a single int or tensor value representing the maximum text sequence length.",
-                standard_warn=False,
-            )
-            if max_txt_seq_len is None:
-                # Use max of txt_seq_lens for backward compatibility
-                max_txt_seq_len = max(txt_seq_lens) if isinstance(txt_seq_lens, list) else txt_seq_lens
-
         if max_txt_seq_len is None:
-            raise ValueError("Either `max_txt_seq_len` or `txt_seq_lens` (deprecated) must be provided.")
+            raise ValueError("`max_txt_seq_len` must be provided.")
 
         # Validate batch inference with variable-sized images
         if isinstance(video_fhw, list) and len(video_fhw) > 1:
@@ -297,19 +288,21 @@ class QwenEmbedRope(nn.Module):
                 max_vid_index = max(height, width, max_vid_index)
 
         max_txt_seq_len_int = int(max_txt_seq_len)
-        # Create device-specific copy for text freqs without modifying self.pos_freqs
-        txt_freqs = self.pos_freqs.to(device)[max_vid_index : max_vid_index + max_txt_seq_len_int, ...]
+        # Use cached device-transferred freqs to avoid CPU→GPU sync every forward call
+        pos_freqs_device, _ = self._get_device_freqs(device)
+        txt_freqs = pos_freqs_device[max_vid_index : max_vid_index + max_txt_seq_len_int, ...]
         vid_freqs = torch.cat(vid_freqs, dim=0)
 
         return vid_freqs, txt_freqs
 
-    @functools.lru_cache(maxsize=128)
+    @lru_cache_unless_export(maxsize=128)
     def _compute_video_freqs(
         self, frame: int, height: int, width: int, idx: int = 0, device: torch.device = None
     ) -> torch.Tensor:
         seq_lens = frame * height * width
-        pos_freqs = self.pos_freqs.to(device) if device is not None else self.pos_freqs
-        neg_freqs = self.neg_freqs.to(device) if device is not None else self.neg_freqs
+        pos_freqs, neg_freqs = (
+            self._get_device_freqs(device) if device is not None else (self.pos_freqs, self.neg_freqs)
+        )
 
         freqs_pos = pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_neg = neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
@@ -329,7 +322,7 @@ class QwenEmbedRope(nn.Module):
 
 
 class QwenEmbedLayer3DRope(nn.Module):
-    def __init__(self, theta: int, axes_dim: List[int], scale_rope=False):
+    def __init__(self, theta: int, axes_dim: list[int], scale_rope=False):
         super().__init__()
         self.theta = theta
         self.axes_dim = axes_dim
@@ -364,15 +357,20 @@ class QwenEmbedLayer3DRope(nn.Module):
         freqs = torch.polar(torch.ones_like(freqs), freqs)
         return freqs
 
+    @lru_cache_unless_export(maxsize=None)
+    def _get_device_freqs(self, device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return pos_freqs and neg_freqs on the given device."""
+        return self.pos_freqs.to(device), self.neg_freqs.to(device)
+
     def forward(
         self,
-        video_fhw: Union[Tuple[int, int, int], List[Tuple[int, int, int]]],
-        max_txt_seq_len: Union[int, torch.Tensor],
+        video_fhw: tuple[int, int, int, list[tuple[int, int, int]]],
+        max_txt_seq_len: int | torch.Tensor,
         device: torch.device = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         """
         Args:
-            video_fhw (`Tuple[int, int, int]` or `List[Tuple[int, int, int]]`):
+            video_fhw (`tuple[int, int, int]` or `list[tuple[int, int, int]]`):
                 A list of 3 integers [frame, height, width] representing the shape of the video, or a list of layer
                 structures.
             max_txt_seq_len (`int` or `torch.Tensor`):
@@ -418,17 +416,19 @@ class QwenEmbedLayer3DRope(nn.Module):
 
         max_vid_index = max(max_vid_index, layer_num)
         max_txt_seq_len_int = int(max_txt_seq_len)
-        # Create device-specific copy for text freqs without modifying self.pos_freqs
-        txt_freqs = self.pos_freqs.to(device)[max_vid_index : max_vid_index + max_txt_seq_len_int, ...]
+        # Use cached device-transferred freqs to avoid CPU→GPU sync every forward call
+        pos_freqs_device, _ = self._get_device_freqs(device)
+        txt_freqs = pos_freqs_device[max_vid_index : max_vid_index + max_txt_seq_len_int, ...]
         vid_freqs = torch.cat(vid_freqs, dim=0)
 
         return vid_freqs, txt_freqs
 
-    @functools.lru_cache(maxsize=None)
+    @lru_cache_unless_export(maxsize=None)
     def _compute_video_freqs(self, frame, height, width, idx=0, device: torch.device = None):
         seq_lens = frame * height * width
-        pos_freqs = self.pos_freqs.to(device) if device is not None else self.pos_freqs
-        neg_freqs = self.neg_freqs.to(device) if device is not None else self.neg_freqs
+        pos_freqs, neg_freqs = (
+            self._get_device_freqs(device) if device is not None else (self.pos_freqs, self.neg_freqs)
+        )
 
         freqs_pos = pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_neg = neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
@@ -446,11 +446,12 @@ class QwenEmbedLayer3DRope(nn.Module):
         freqs = torch.cat([freqs_frame, freqs_height, freqs_width], dim=-1).reshape(seq_lens, -1)
         return freqs.clone().contiguous()
 
-    @functools.lru_cache(maxsize=None)
+    @lru_cache_unless_export(maxsize=None)
     def _compute_condition_freqs(self, frame, height, width, device: torch.device = None):
         seq_lens = frame * height * width
-        pos_freqs = self.pos_freqs.to(device) if device is not None else self.pos_freqs
-        neg_freqs = self.neg_freqs.to(device) if device is not None else self.neg_freqs
+        pos_freqs, neg_freqs = (
+            self._get_device_freqs(device) if device is not None else (self.pos_freqs, self.neg_freqs)
+        )
 
         freqs_pos = pos_freqs.split([x // 2 for x in self.axes_dim], dim=1)
         freqs_neg = neg_freqs.split([x // 2 for x in self.axes_dim], dim=1)
@@ -490,11 +491,23 @@ class QwenDoubleStreamAttnProcessor2_0:
         hidden_states: torch.FloatTensor,  # Image stream
         encoder_hidden_states: torch.FloatTensor = None,  # Text stream
         encoder_hidden_states_mask: torch.FloatTensor = None,
-        attention_mask: Optional[torch.FloatTensor] = None,
-        image_rotary_emb: Optional[torch.Tensor] = None,
+        attention_mask: torch.FloatTensor | None = None,
+        image_rotary_emb: torch.Tensor | None = None,
     ) -> torch.FloatTensor:
         if encoder_hidden_states is None:
             raise ValueError("QwenDoubleStreamAttnProcessor2_0 requires encoder_hidden_states (text stream)")
+
+        if attention_mask is not None:
+            raise ValueError(
+                "QwenDoubleStreamAttnProcessor2_0 does not accept an external attention_mask. "
+                "Pass encoder_hidden_states_mask to let the processor build the joint mask."
+            )
+
+        if encoder_hidden_states_mask is not None:
+            seq_img = hidden_states.shape[1]
+            image_mask = torch.ones((hidden_states.shape[0], seq_img), dtype=torch.bool, device=hidden_states.device)
+            attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
+            attention_mask = attention_mask[:, None, None, :]
 
         seq_txt = encoder_hidden_states.shape[1]
 
@@ -561,11 +574,11 @@ class QwenDoubleStreamAttnProcessor2_0:
         img_attn_output = joint_hidden_states[:, seq_txt:, :]  # Image part
 
         # Apply output projections
-        img_attn_output = attn.to_out[0](img_attn_output)
+        img_attn_output = attn.to_out[0](img_attn_output.contiguous())
         if len(attn.to_out) > 1:
             img_attn_output = attn.to_out[1](img_attn_output)  # dropout
 
-        txt_attn_output = attn.to_add_out(txt_attn_output)
+        txt_attn_output = attn.to_add_out(txt_attn_output.contiguous())
 
         return img_attn_output, txt_attn_output
 
@@ -663,10 +676,10 @@ class QwenImageTransformerBlock(nn.Module):
         encoder_hidden_states: torch.Tensor,
         encoder_hidden_states_mask: torch.Tensor,
         temb: torch.Tensor,
-        image_rotary_emb: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
-        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
-        modulate_index: Optional[List[int]] = None,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor] | None = None,
+        joint_attention_kwargs: dict[str, Any] | None = None,
+        modulate_index: list[int] | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         # Get modulation parameters for both streams
         img_mod_params = self.img_mod(temb)  # [B, 6*dim]
 
@@ -753,7 +766,7 @@ class QwenImageTransformer2DModel(
             `encoder_hidden_states`).
         guidance_embeds (`bool`, defaults to `False`):
             Whether to use guidance embeddings for guidance-distilled variant of the model.
-        axes_dims_rope (`Tuple[int]`, defaults to `(16, 56, 56)`):
+        axes_dims_rope (`tuple[int]`, defaults to `(16, 56, 56)`):
             The dimensions to use for the rotary positional embeddings.
     """
 
@@ -769,6 +782,7 @@ class QwenImageTransformer2DModel(
         },
         "transformer_blocks.*": {
             "modulate_index": ContextParallelInput(split_dim=1, expected_dims=2, split_output=False),
+            "encoder_hidden_states_mask": ContextParallelInput(split_dim=1, expected_dims=2, split_output=False),
         },
         "pos_embed": {
             0: ContextParallelInput(split_dim=0, expected_dims=2, split_output=True),
@@ -782,13 +796,13 @@ class QwenImageTransformer2DModel(
         self,
         patch_size: int = 2,
         in_channels: int = 64,
-        out_channels: Optional[int] = 16,
+        out_channels: int | None = 16,
         num_layers: int = 60,
         attention_head_dim: int = 128,
         num_attention_heads: int = 24,
         joint_attention_dim: int = 3584,
         guidance_embeds: bool = False,  # TODO: this should probably be removed
-        axes_dims_rope: Tuple[int, int, int] = (16, 56, 56),
+        axes_dims_rope: tuple[int, int, int] = (16, 56, 56),
         zero_cond_t: bool = False,
         use_additional_t_cond: bool = False,
         use_layer3d_rope: bool = False,
@@ -829,20 +843,20 @@ class QwenImageTransformer2DModel(
         self.gradient_checkpointing = False
         self.zero_cond_t = zero_cond_t
 
+    @apply_lora_scale("attention_kwargs")
     def forward(
         self,
         hidden_states: torch.Tensor,
         encoder_hidden_states: torch.Tensor = None,
         encoder_hidden_states_mask: torch.Tensor = None,
         timestep: torch.LongTensor = None,
-        img_shapes: Optional[List[Tuple[int, int, int]]] = None,
-        txt_seq_lens: Optional[List[int]] = None,
+        img_shapes: list[tuple[int, int, int]] | None = None,
         guidance: torch.Tensor = None,  # TODO: this should probably be removed
-        attention_kwargs: Optional[Dict[str, Any]] = None,
+        attention_kwargs: dict[str, Any] | None = None,
         controlnet_block_samples=None,
         additional_t_cond=None,
         return_dict: bool = True,
-    ) -> Union[torch.Tensor, Transformer2DModelOutput]:
+    ) -> torch.Tensor | Transformer2DModelOutput:
         """
         The [`QwenTransformer2DModel`] forward method.
 
@@ -857,11 +871,8 @@ class QwenImageTransformer2DModel(
                 (not just contiguous valid tokens followed by padding) since it's applied element-wise in attention.
             timestep ( `torch.LongTensor`):
                 Used to indicate denoising step.
-            img_shapes (`List[Tuple[int, int, int]]`, *optional*):
+            img_shapes (`list[tuple[int, int, int]]`, *optional*):
                 Image shapes for RoPE computation.
-            txt_seq_lens (`List[int]`, *optional*, **Deprecated**):
-                Deprecated parameter. Use `encoder_hidden_states_mask` instead. If provided, the maximum value will be
-                used to compute RoPE sequence length.
             guidance (`torch.Tensor`, *optional*):
                 Guidance tensor for conditional generation.
             attention_kwargs (`dict`, *optional*):
@@ -870,6 +881,8 @@ class QwenImageTransformer2DModel(
                 [diffusers.models.attention_processor](https://github.com/huggingface/diffusers/blob/main/src/diffusers/models/attention_processor.py).
             controlnet_block_samples (*optional*):
                 ControlNet block samples to add to the transformer blocks.
+            additional_t_cond (`torch.Tensor`, *optional*):
+                Additional timestep conditioning added to the timestep embedding.
             return_dict (`bool`, *optional*, defaults to `True`):
                 Whether or not to return a [`~models.transformer_2d.Transformer2DModelOutput`] instead of a plain
                 tuple.
@@ -878,30 +891,6 @@ class QwenImageTransformer2DModel(
             If `return_dict` is True, an [`~models.transformer_2d.Transformer2DModelOutput`] is returned, otherwise a
             `tuple` where the first element is the sample tensor.
         """
-        if txt_seq_lens is not None:
-            deprecate(
-                "txt_seq_lens",
-                "0.39.0",
-                "Passing `txt_seq_lens` is deprecated and will be removed in version 0.39.0. "
-                "Please use `encoder_hidden_states_mask` instead. "
-                "The mask-based approach is more flexible and supports variable-length sequences.",
-                standard_warn=False,
-            )
-        if attention_kwargs is not None:
-            attention_kwargs = attention_kwargs.copy()
-            lora_scale = attention_kwargs.pop("scale", 1.0)
-        else:
-            lora_scale = 1.0
-
-        if USE_PEFT_BACKEND:
-            # weight the lora layers by setting `lora_scale` for each PEFT layer
-            scale_lora_layers(self, lora_scale)
-        else:
-            if attention_kwargs is not None and attention_kwargs.get("scale", None) is not None:
-                logger.warning(
-                    "Passing `scale` via `joint_attention_kwargs` when not using the PEFT backend is ineffective."
-                )
-
         hidden_states = self.img_in(hidden_states)
 
         timestep = timestep.to(hidden_states.dtype)
@@ -935,26 +924,16 @@ class QwenImageTransformer2DModel(
 
         image_rotary_emb = self.pos_embed(img_shapes, max_txt_seq_len=text_seq_len, device=hidden_states.device)
 
-        # Construct joint attention mask once to avoid reconstructing in every block
-        # This eliminates 60 GPU syncs during training while maintaining torch.compile compatibility
-        block_attention_kwargs = attention_kwargs.copy() if attention_kwargs is not None else {}
-        if encoder_hidden_states_mask is not None:
-            # Build joint mask: [text_mask, all_ones_for_image]
-            batch_size, image_seq_len = hidden_states.shape[:2]
-            image_mask = torch.ones((batch_size, image_seq_len), dtype=torch.bool, device=hidden_states.device)
-            joint_attention_mask = torch.cat([encoder_hidden_states_mask, image_mask], dim=1)
-            block_attention_kwargs["attention_mask"] = joint_attention_mask
-
         for index_block, block in enumerate(self.transformer_blocks):
             if torch.is_grad_enabled() and self.gradient_checkpointing:
                 encoder_hidden_states, hidden_states = self._gradient_checkpointing_func(
                     block,
                     hidden_states,
                     encoder_hidden_states,
-                    None,  # Don't pass encoder_hidden_states_mask (using attention_mask instead)
+                    encoder_hidden_states_mask,
                     temb,
                     image_rotary_emb,
-                    block_attention_kwargs,
+                    attention_kwargs,
                     modulate_index,
                 )
 
@@ -962,10 +941,10 @@ class QwenImageTransformer2DModel(
                 encoder_hidden_states, hidden_states = block(
                     hidden_states=hidden_states,
                     encoder_hidden_states=encoder_hidden_states,
-                    encoder_hidden_states_mask=None,  # Don't pass (using attention_mask instead)
+                    encoder_hidden_states_mask=encoder_hidden_states_mask,
                     temb=temb,
                     image_rotary_emb=image_rotary_emb,
-                    joint_attention_kwargs=block_attention_kwargs,
+                    joint_attention_kwargs=attention_kwargs,
                     modulate_index=modulate_index,
                 )
 
@@ -980,10 +959,6 @@ class QwenImageTransformer2DModel(
         # Use only the image part (hidden_states) from the dual-stream blocks
         hidden_states = self.norm_out(hidden_states, temb)
         output = self.proj_out(hidden_states)
-
-        if USE_PEFT_BACKEND:
-            # remove `lora_scale` from each PEFT layer
-            unscale_lora_layers(self, lora_scale)
 
         if not return_dict:
             return (output,)

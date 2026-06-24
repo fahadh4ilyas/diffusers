@@ -13,7 +13,7 @@
 # limitations under the License.
 import inspect
 import re
-from typing import Any, Dict, List, Optional, Union
+from typing import Any
 
 import numpy as np
 import torch
@@ -145,10 +145,10 @@ def calculate_shift(
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion.retrieve_timesteps
 def retrieve_timesteps(
     scheduler,
-    num_inference_steps: Optional[int] = None,
-    device: Optional[Union[str, torch.device]] = None,
-    timesteps: Optional[List[int]] = None,
-    sigmas: Optional[List[float]] = None,
+    num_inference_steps: int | None = None,
+    device: str | torch.device | None = None,
+    timesteps: list[int] | None = None,
+    sigmas: list[float] | None = None,
     **kwargs,
 ):
     r"""
@@ -163,15 +163,15 @@ def retrieve_timesteps(
             must be `None`.
         device (`str` or `torch.device`, *optional*):
             The device to which the timesteps should be moved to. If `None`, the timesteps are not moved.
-        timesteps (`List[int]`, *optional*):
+        timesteps (`list[int]`, *optional*):
             Custom timesteps used to override the timestep spacing strategy of the scheduler. If `timesteps` is passed,
             `num_inference_steps` and `sigmas` must be `None`.
-        sigmas (`List[float]`, *optional*):
+        sigmas (`list[float]`, *optional*):
             Custom sigmas used to override the timestep spacing strategy of the scheduler. If `sigmas` is passed,
             `num_inference_steps` and `timesteps` must be `None`.
 
     Returns:
-        `Tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
+        `tuple[torch.Tensor, int]`: A tuple where the first element is the timestep schedule from the scheduler and the
         second element is the number of inference steps.
     """
     if timesteps is not None and sigmas is not None:
@@ -271,7 +271,7 @@ class LongCatImagePipeline(DiffusionPipeline, FromSingleFileMixin):
         rewrite_prompt = output_text
         return rewrite_prompt
 
-    def _encode_prompt(self, prompt: List[str]):
+    def _encode_prompt(self, prompt: list[str]):
         batch_all_tokens = []
 
         for each_prompt in prompt:
@@ -334,9 +334,9 @@ class LongCatImagePipeline(DiffusionPipeline, FromSingleFileMixin):
 
     def encode_prompt(
         self,
-        prompt: Union[str, List[str]] = None,
-        num_images_per_prompt: Optional[int] = 1,
-        prompt_embeds: Optional[torch.Tensor] = None,
+        prompt: str | list[str] = None,
+        num_images_per_prompt: int | None = 1,
+        prompt_embeds: torch.Tensor | None = None,
     ):
         prompt = [prompt] if isinstance(prompt, str) else prompt
         batch_size = len(prompt)
@@ -472,34 +472,69 @@ class LongCatImagePipeline(DiffusionPipeline, FromSingleFileMixin):
     @torch.no_grad()
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
-        negative_prompt: Union[str, List[str]] = None,
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        prompt: str | list[str] = None,
+        negative_prompt: str | list[str] = None,
+        height: int | None = None,
+        width: int | None = None,
         num_inference_steps: int = 50,
-        sigmas: Optional[List[float]] = None,
+        sigmas: list[float] | None = None,
         guidance_scale: float = 4.5,
-        num_images_per_prompt: Optional[int] = 1,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.FloatTensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        output_type: Optional[str] = "pil",
+        num_images_per_prompt: int | None = 1,
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.FloatTensor | None = None,
+        prompt_embeds: torch.FloatTensor | None = None,
+        negative_prompt_embeds: torch.FloatTensor | None = None,
+        output_type: str | None = "pil",
         return_dict: bool = True,
-        joint_attention_kwargs: Optional[Dict[str, Any]] = None,
-        enable_cfg_renorm: Optional[bool] = True,
-        cfg_renorm_min: Optional[float] = 0.0,
-        enable_prompt_rewrite: Optional[bool] = True,
+        joint_attention_kwargs: dict[str, Any] | None = None,
+        enable_cfg_renorm: bool | None = True,
+        cfg_renorm_min: float | None = 0.0,
+        enable_prompt_rewrite: bool | None = True,
     ):
         r"""
         Function invoked when calling the pipeline for generation.
 
         Args:
-            enable_cfg_renorm: Whether to enable cfg_renorm. Enabling cfg_renorm will improve image quality,
-                but it may lead to a decrease in the stability of some image outputs..
-            cfg_renorm_min: The minimum value of the cfg_renorm_scale range (0-1).
-                cfg_renorm_min = 1.0, renorm has no effect, while cfg_renorm_min=0.0, the renorm range is larger.
-            enable_prompt_rewrite: whether to enable prompt rewrite.
+            prompt (`str` or `list[str]`, *optional*):
+                The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`.
+            negative_prompt (`str` or `list[str]`, *optional*):
+                The prompt or prompts not to guide the image generation. Ignored when not using guidance.
+            height (`int`, *optional*):
+                The height in pixels of the generated image.
+            width (`int`, *optional*):
+                The width in pixels of the generated image.
+            num_inference_steps (`int`, *optional*, defaults to 50):
+                The number of denoising steps.
+            sigmas (`list[float]`, *optional*):
+                Custom sigmas to use for the denoising process. If not defined, the scheduler's default schedule is
+                used.
+            guidance_scale (`float`, *optional*, defaults to 4.5):
+                Classifier-free guidance scale. Values greater than 1 enable CFG.
+            num_images_per_prompt (`int`, *optional*, defaults to 1):
+                The number of images to generate per prompt.
+            generator (`torch.Generator` or `list[torch.Generator]`, *optional*):
+                A `torch.Generator` to make generation deterministic.
+            latents (`torch.FloatTensor`, *optional*):
+                Pre-generated noisy latents to be used as inputs for image generation.
+            prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated text embeddings. If not provided, embeddings are generated from `prompt`.
+            negative_prompt_embeds (`torch.FloatTensor`, *optional*):
+                Pre-generated negative text embeddings. Used when classifier-free guidance is enabled.
+            output_type (`str`, *optional*, defaults to `"pil"`):
+                The output format of the generated image.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~pipelines.LongCatImagePipelineOutput`] instead of a plain tuple.
+            joint_attention_kwargs (`dict`, *optional*):
+                Kwargs passed to the joint attention processor.
+            enable_cfg_renorm (`bool`, *optional*, defaults to `True`):
+                Whether to enable cfg_renorm. Enabling cfg_renorm will improve image quality, but it may lead to a
+                decrease in the stability of some image outputs.
+            cfg_renorm_min (`float`, *optional*, defaults to 0.0):
+                The minimum value of the cfg_renorm_scale range (0-1). `cfg_renorm_min = 1.0` disables renorm, while
+                `cfg_renorm_min = 0.0` widens the renorm range.
+            enable_prompt_rewrite (`bool`, *optional*, defaults to `True`):
+                Whether to enable prompt rewrite.
+
         Examples:
 
         Returns:

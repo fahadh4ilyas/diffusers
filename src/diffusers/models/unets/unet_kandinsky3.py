@@ -13,7 +13,6 @@
 # limitations under the License.
 
 from dataclasses import dataclass
-from typing import Tuple, Union
 
 import torch
 from torch import nn
@@ -54,9 +53,9 @@ class Kandinsky3UNet(ModelMixin, AttentionMixin, ConfigMixin):
         time_embedding_dim: int = 1536,
         groups: int = 32,
         attention_head_dim: int = 64,
-        layers_per_block: Union[int, Tuple[int]] = 3,
-        block_out_channels: Tuple[int, ...] = (384, 768, 1536, 3072),
-        cross_attention_dim: Union[int, Tuple[int]] = 4096,
+        layers_per_block: int | tuple[int] = 3,
+        block_out_channels: tuple[int, ...] = (384, 768, 1536, 3072),
+        cross_attention_dim: int | tuple[int] = 4096,
         encoder_hid_dim: int = 4096,
     ):
         super().__init__()
@@ -148,6 +147,19 @@ class Kandinsky3UNet(ModelMixin, AttentionMixin, ConfigMixin):
         self.set_attn_processor(AttnProcessor())
 
     def forward(self, sample, timestep, encoder_hidden_states=None, encoder_attention_mask=None, return_dict=True):
+        r"""
+        Args:
+            sample (`torch.Tensor`): Input sample.
+            timestep (`torch.Tensor`, `float`, or `int`):
+                The number of timesteps to denoise an input.
+            encoder_hidden_states (`torch.Tensor`, *optional*):
+                Conditional embeddings (embeddings computed from the input conditions such as prompts) to use.
+            encoder_attention_mask (`torch.Tensor`, *optional*):
+                Attention mask applied to `encoder_hidden_states`.
+            return_dict (`bool`, *optional*, defaults to `True`):
+                Whether or not to return a [`~models.unets.unet_2d_condition.UNet2DConditionOutput`] instead of a plain
+                tuple.
+        """
         if encoder_attention_mask is not None:
             encoder_attention_mask = (1 - encoder_attention_mask.to(sample.dtype)) * -10000.0
             encoder_attention_mask = encoder_attention_mask.unsqueeze(1)

@@ -16,9 +16,8 @@ import html
 import inspect
 import re
 import urllib.parse as ul
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable
 
-import ftfy
 import torch
 from transformers import (
     AutoTokenizer,
@@ -34,12 +33,12 @@ from diffusers.models.transformers.transformer_prx import PRXTransformer2DModel
 from diffusers.pipelines.pipeline_utils import DiffusionPipeline
 from diffusers.pipelines.prx.pipeline_output import PRXPipelineOutput
 from diffusers.schedulers import FlowMatchEulerDiscreteScheduler
-from diffusers.utils import (
-    logging,
-    replace_example_docstring,
-)
+from diffusers.utils import is_ftfy_available, logging, replace_example_docstring
 from diffusers.utils.torch_utils import randn_tensor
 
+
+if is_ftfy_available():
+    import ftfy
 
 DEFAULT_RESOLUTION = 512
 
@@ -231,6 +230,12 @@ class TextPreprocessor:
 
         return text.strip()
 
+    def basic_clean(self, text: str) -> str:
+        """Light cleaning: fix mojibake and unescape HTML. Used when skip_text_cleaning=True."""
+        text = ftfy.fix_text(text)
+        text = html.unescape(html.unescape(text))
+        return text.strip()
+
 
 EXAMPLE_DOC_STRING = """
     Examples:
@@ -284,9 +289,9 @@ class PRXPipeline(
         transformer: PRXTransformer2DModel,
         scheduler: FlowMatchEulerDiscreteScheduler,
         text_encoder: T5GemmaEncoder,
-        tokenizer: Union[T5TokenizerFast, GemmaTokenizerFast, AutoTokenizer],
-        vae: Optional[Union[AutoencoderKL, AutoencoderDC]] = None,
-        default_sample_size: Optional[int] = DEFAULT_RESOLUTION,
+        tokenizer: T5TokenizerFast | GemmaTokenizerFast | AutoTokenizer,
+        vae: AutoencoderKL | AutoencoderDC | None = None,
+        default_sample_size: int | None = DEFAULT_RESOLUTION,
     ):
         super().__init__()
 
@@ -352,8 +357,8 @@ class PRXPipeline(
         width: int,
         dtype: torch.dtype,
         device: torch.device,
-        generator: Optional[torch.Generator] = None,
-        latents: Optional[torch.Tensor] = None,
+        generator: torch.Generator | None = None,
+        latents: torch.Tensor | None = None,
     ):
         """Prepare initial latents for the diffusion process."""
         if latents is None:
@@ -370,15 +375,17 @@ class PRXPipeline(
 
     def encode_prompt(
         self,
-        prompt: Union[str, List[str]],
-        device: Optional[torch.device] = None,
+        prompt: str | list[str],
+        device: torch.device | None = None,
         do_classifier_free_guidance: bool = True,
         negative_prompt: str = "",
         num_images_per_prompt: int = 1,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_attention_mask: Optional[torch.BoolTensor] = None,
-        negative_prompt_attention_mask: Optional[torch.BoolTensor] = None,
+        prompt_embeds: torch.FloatTensor | None = None,
+        negative_prompt_embeds: torch.FloatTensor | None = None,
+        prompt_attention_mask: torch.BoolTensor | None = None,
+        negative_prompt_attention_mask: torch.BoolTensor | None = None,
+        tokenizer_max_length: int | None = None,
+        skip_text_cleaning: bool = False,
     ):
         """Encode text prompt using standard text encoder and tokenizer, or use precomputed embeddings."""
         if device is None:
@@ -389,7 +396,14 @@ class PRXPipeline(
                 prompt = [prompt]
             # Encode the prompts
             prompt_embeds, prompt_attention_mask, negative_prompt_embeds, negative_prompt_attention_mask = (
-                self._encode_prompt_standard(prompt, device, do_classifier_free_guidance, negative_prompt)
+                self._encode_prompt_standard(
+                    prompt,
+                    device,
+                    do_classifier_free_guidance,
+                    negative_prompt,
+                    tokenizer_max_length=tokenizer_max_length,
+                    skip_text_cleaning=skip_text_cleaning,
+                )
             )
 
         # Duplicate embeddings for each generation per prompt
@@ -420,13 +434,21 @@ class PRXPipeline(
             negative_prompt_attention_mask if do_classifier_free_guidance else None,
         )
 
-    def _tokenize_prompts(self, prompts: List[str], device: torch.device):
+    def _tokenize_prompts(
+        self,
+        prompts: list[str],
+        device: torch.device,
+        tokenizer_max_length: int | None = None,
+        skip_text_cleaning: bool = False,
+    ):
         """Tokenize and clean prompts."""
-        cleaned = [self.text_preprocessor.clean_text(text) for text in prompts]
+        clean_fn = self.text_preprocessor.basic_clean if skip_text_cleaning else self.text_preprocessor.clean_text
+        cleaned = [clean_fn(text) for text in prompts]
+        max_length = tokenizer_max_length or self.tokenizer.model_max_length
         tokens = self.tokenizer(
             cleaned,
             padding="max_length",
-            max_length=self.tokenizer.model_max_length,
+            max_length=max_length,
             truncation=True,
             return_attention_mask=True,
             return_tensors="pt",
@@ -435,10 +457,12 @@ class PRXPipeline(
 
     def _encode_prompt_standard(
         self,
-        prompt: List[str],
+        prompt: list[str],
         device: torch.device,
         do_classifier_free_guidance: bool = True,
         negative_prompt: str = "",
+        tokenizer_max_length: int | None = None,
+        skip_text_cleaning: bool = False,
     ):
         """Encode prompt using standard text encoder and tokenizer with batch processing."""
         batch_size = len(prompt)
@@ -451,7 +475,9 @@ class PRXPipeline(
         else:
             prompts_to_encode = prompt
 
-        input_ids, attention_mask = self._tokenize_prompts(prompts_to_encode, device)
+        input_ids, attention_mask = self._tokenize_prompts(
+            prompts_to_encode, device, tokenizer_max_length=tokenizer_max_length, skip_text_cleaning=skip_text_cleaning
+        )
 
         with torch.no_grad():
             embeddings = self.text_encoder(
@@ -473,13 +499,13 @@ class PRXPipeline(
 
     def check_inputs(
         self,
-        prompt: Union[str, List[str]],
+        prompt: str | list[str],
         height: int,
         width: int,
         guidance_scale: float,
-        callback_on_step_end_tensor_inputs: Optional[List[str]] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
+        callback_on_step_end_tensor_inputs: list[str] | None = None,
+        prompt_embeds: torch.FloatTensor | None = None,
+        negative_prompt_embeds: torch.FloatTensor | None = None,
     ):
         """Check that all inputs are in correct format."""
         if prompt is not None and prompt_embeds is not None:
@@ -502,10 +528,12 @@ class PRXPipeline(
                 "`negative_prompt_embeds` must also be provided for classifier-free guidance."
             )
 
-        spatial_compression = self.vae_scale_factor
-        if height % spatial_compression != 0 or width % spatial_compression != 0:
+        # The latents must be divisible by the transformer's patch size after VAE compression.
+        dimension_multiple = self.vae_scale_factor * self.transformer.config.patch_size
+        if height % dimension_multiple != 0 or width % dimension_multiple != 0:
             raise ValueError(
-                f"`height` and `width` have to be divisible by {spatial_compression} but are {height} and {width}."
+                f"`height` and `width` have to be divisible by {dimension_multiple} (vae_scale_factor *"
+                f" transformer patch_size) but are {height} and {width}."
             )
 
         if guidance_scale < 1.0:
@@ -527,31 +555,33 @@ class PRXPipeline(
     @replace_example_docstring(EXAMPLE_DOC_STRING)
     def __call__(
         self,
-        prompt: Union[str, List[str]] = None,
+        prompt: str | list[str] = None,
         negative_prompt: str = "",
-        height: Optional[int] = None,
-        width: Optional[int] = None,
+        height: int | None = None,
+        width: int | None = None,
         num_inference_steps: int = 28,
-        timesteps: List[int] = None,
+        timesteps: list[int] = None,
         guidance_scale: float = 4.0,
-        num_images_per_prompt: Optional[int] = 1,
-        generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.Tensor] = None,
-        prompt_embeds: Optional[torch.FloatTensor] = None,
-        negative_prompt_embeds: Optional[torch.FloatTensor] = None,
-        prompt_attention_mask: Optional[torch.BoolTensor] = None,
-        negative_prompt_attention_mask: Optional[torch.BoolTensor] = None,
-        output_type: Optional[str] = "pil",
+        num_images_per_prompt: int | None = 1,
+        generator: torch.Generator | list[torch.Generator] | None = None,
+        latents: torch.Tensor | None = None,
+        prompt_embeds: torch.FloatTensor | None = None,
+        negative_prompt_embeds: torch.FloatTensor | None = None,
+        prompt_attention_mask: torch.BoolTensor | None = None,
+        negative_prompt_attention_mask: torch.BoolTensor | None = None,
+        output_type: str | None = "pil",
         return_dict: bool = True,
         use_resolution_binning: bool = True,
-        callback_on_step_end: Optional[Callable[[int, int, Dict], None]] = None,
-        callback_on_step_end_tensor_inputs: List[str] = ["latents"],
+        callback_on_step_end: Callable[[int, int], None] | None = None,
+        callback_on_step_end_tensor_inputs: list[str] = ["latents"],
+        tokenizer_max_length: int | None = None,
+        skip_text_cleaning: bool = False,
     ):
         """
         Function invoked when calling the pipeline for generation.
 
         Args:
-            prompt (`str` or `List[str]`, *optional*):
+            prompt (`str` or `list[str]`, *optional*):
                 The prompt or prompts to guide the image generation. If not defined, one has to pass `prompt_embeds`
                 instead.
             negative_prompt (`str`, *optional*, defaults to `""`):
@@ -564,7 +594,7 @@ class PRXPipeline(
             num_inference_steps (`int`, *optional*, defaults to 28):
                 The number of denoising steps. More denoising steps usually lead to a higher quality image at the
                 expense of slower inference.
-            timesteps (`List[int]`, *optional*):
+            timesteps (`list[int]`, *optional*):
                 Custom timesteps to use for the denoising process with schedulers which support a `timesteps` argument
                 in their `set_timesteps` method. If not defined, the default behavior when `num_inference_steps` is
                 passed will be used. Must be in descending order.
@@ -576,7 +606,7 @@ class PRXPipeline(
                 the text `prompt`, usually at the expense of lower image quality.
             num_images_per_prompt (`int`, *optional*, defaults to 1):
                 The number of images to generate per prompt.
-            generator (`torch.Generator` or `List[torch.Generator]`, *optional*):
+            generator (`torch.Generator` or `list[torch.Generator]`, *optional*):
                 One or a list of [torch generator(s)](https://pytorch.org/docs/stable/generated/torch.Generator.html)
                 to make generation deterministic.
             latents (`torch.Tensor`, *optional*):
@@ -599,6 +629,12 @@ class PRXPipeline(
             output_type (`str`, *optional*, defaults to `"pil"`):
                 The output format of the generate image. Choose between
                 [PIL](https://pillow.readthedocs.io/en/stable/): `PIL.Image.Image` or `np.array`.
+            tokenizer_max_length (`int`, *optional*):
+                Override the maximum number of tokens used when tokenizing the prompt. Defaults to the tokenizer's own
+                ``model_max_length`` when not set.
+            skip_text_cleaning (`bool`, *optional*, defaults to `False`):
+                If `True`, uses only light prompt cleaning (fix encoding + unescape HTML) instead of the full DeepFloyd
+                cleaning pipeline.
             return_dict (`bool`, *optional*, defaults to `True`):
                 Whether or not to return a [`~pipelines.prx.PRXPipelineOutput`] instead of a plain tuple.
             use_resolution_binning (`bool`, *optional*, defaults to `True`):
@@ -610,7 +646,7 @@ class PRXPipeline(
                 with the following arguments: `callback_on_step_end(self, step, timestep, callback_kwargs)`.
                 `callback_kwargs` will include a list of all tensors as specified by
                 `callback_on_step_end_tensor_inputs`.
-            callback_on_step_end_tensor_inputs (`List`, *optional*):
+            callback_on_step_end_tensor_inputs (`list`, *optional*):
                 The list of tensor inputs for the `callback_on_step_end` function. The tensors specified in the list
                 will be passed as `callback_kwargs` argument. You will only be able to include tensors that are listed
                 in the `._callback_tensor_inputs` attribute.
@@ -628,11 +664,6 @@ class PRXPipeline(
         width = width or default_resolution
 
         if use_resolution_binning:
-            if self.image_processor is None:
-                raise ValueError(
-                    "Resolution binning requires a VAE with image_processor, but VAE is not available. "
-                    "Set use_resolution_binning=False or provide a VAE."
-                )
             if self.default_sample_size not in ASPECT_RATIO_BINS:
                 raise ValueError(
                     f"Resolution binning is only supported for default_sample_size in {list(ASPECT_RATIO_BINS.keys())}, "
@@ -685,6 +716,8 @@ class PRXPipeline(
             negative_prompt_embeds=negative_prompt_embeds,
             prompt_attention_mask=prompt_attention_mask,
             negative_prompt_attention_mask=negative_prompt_attention_mask,
+            tokenizer_max_length=tokenizer_max_length,
+            skip_text_cleaning=skip_text_cleaning,
         )
         # Expose standard names for callbacks parity
         prompt_embeds = text_embeddings
