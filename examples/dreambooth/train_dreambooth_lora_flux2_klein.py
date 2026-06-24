@@ -1210,6 +1210,7 @@ def main(args):
         center_crop=args.center_crop,
         buckets=buckets,
     )
+    precompute_latents = args.cache_latents or train_dataset.custom_instance_prompts
     batch_sampler = BucketBatchSampler(train_dataset, batch_size=args.train_batch_size, drop_last=True, seed=args.seed)
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1591,16 +1592,38 @@ def main(args):
     # if cache_latents is set to True, we encode images to latents and store them.
     # Similar to pre-encoding in the case of a single instance prompt, if custom prompts are provided
     # we encode them in advance as well.
-    precompute_latents = args.cache_latents or train_dataset.custom_instance_prompts
+    if args.cache_latents:
+        instance_latents_cache = [None] * train_dataset.num_instance_images
+        class_latents_cache = [None] * train_dataset.num_instance_images if args.with_prior_preservation else None
+    if train_dataset.custom_instance_prompts:
+        prompt_embeds_cache = [None] * train_dataset.num_instance_images
+        text_ids_cache = [None] * train_dataset.num_instance_images
     if precompute_latents:
-        prompt_embeds_cache = []
-        text_ids_cache = []
-        latents_cache = []
-        for batch in tqdm(train_dataloader, desc="Caching latents"):
+        cache_batch_sampler = BucketBatchSampler(
+            train_dataset, batch_size=args.train_batch_size, drop_last=False, seed=args.seed
+        )
+        cache_dataloader = torch.utils.data.DataLoader(
+            train_dataset,
+            batch_sampler=cache_batch_sampler,
+            collate_fn=lambda examples: collate_fn(examples, args.with_prior_preservation),
+            num_workers=args.dataloader_num_workers,
+        )
+        for batch in tqdm(cache_dataloader, desc="Caching latents"):
+            sample_indices = batch["indices"]
             if "latent_cache" in batch and batch["latent_cache"] is not None:
-                latents_cache.append(batch["latent_cache"])
-                prompt_embeds_cache.append(batch["prompt_embeds"])
-                text_ids_cache.append(batch["text_ids"])
+                latents = batch["latent_cache"]
+                if args.with_prior_preservation:
+                    instance_latents, class_latents = torch.chunk(latents, 2, dim=0)
+                else:
+                    instance_latents = latents
+                for i, idx in enumerate(sample_indices):
+                    instance_latents_cache[idx] = instance_latents[i : i + 1]
+                    if args.with_prior_preservation:
+                        class_latents_cache[idx] = class_latents[i : i + 1]
+                if train_dataset.custom_instance_prompts:
+                    for i, idx in enumerate(sample_indices):
+                        prompt_embeds_cache[idx] = batch["prompt_embeds"][i : i + 1]
+                        text_ids_cache[idx] = batch["text_ids"][i : i + 1]
                 continue
             with torch.no_grad():
                 if args.cache_latents:
@@ -1608,15 +1631,40 @@ def main(args):
                         batch["pixel_values"] = batch["pixel_values"].to(
                             accelerator.device, non_blocking=True, dtype=vae.dtype
                         )
-                        latents_cache.append(vae.encode(batch["pixel_values"]).latent_dist)
+                        latents = vae.encode(batch["pixel_values"]).latent_dist.mode()
+                    if args.with_prior_preservation:
+                        instance_latents, class_latents = torch.chunk(latents, 2, dim=0)
+                    else:
+                        instance_latents = latents
+                    for i, idx in enumerate(sample_indices):
+                        instance_latents_cache[idx] = instance_latents[i : i + 1]
+                        if args.with_prior_preservation:
+                            class_latents_cache[idx] = class_latents[i : i + 1]
                 if train_dataset.custom_instance_prompts:
                     if args.fsdp_text_encoder:
-                        prompt_embeds, text_ids = compute_text_embeddings(batch["prompts"], text_encoding_pipeline)
+                        prompt_embeds, text_ids = compute_text_embeddings(
+                            batch["instance_prompts"], text_encoding_pipeline
+                        )
                     else:
                         with offload_models(text_encoding_pipeline, device=accelerator.device, offload=args.offload):
-                            prompt_embeds, text_ids = compute_text_embeddings(batch["prompts"], text_encoding_pipeline)
-                    prompt_embeds_cache.append(prompt_embeds)
-                    text_ids_cache.append(text_ids)
+                            prompt_embeds, text_ids = compute_text_embeddings(
+                                batch["instance_prompts"], text_encoding_pipeline
+                            )
+                    for i, idx in enumerate(sample_indices):
+                        prompt_embeds_cache[idx] = prompt_embeds[i : i + 1]
+                        text_ids_cache[idx] = text_ids[i : i + 1]
+
+        if args.cache_latents:
+            assert all(latents is not None for latents in instance_latents_cache), "Latent cache has unfilled entries."
+            if args.with_prior_preservation:
+                assert all(latents is not None for latents in class_latents_cache), (
+                    "Class latent cache has unfilled entries."
+                )
+        if train_dataset.custom_instance_prompts:
+            assert all(embeds is not None for embeds in prompt_embeds_cache), (
+                "Prompt embedding cache has unfilled entries."
+            )
+            assert all(ids is not None for ids in text_ids_cache), "Text ID cache has unfilled entries."
 
     # move back to cpu before deleting to ensure memory is freed see: https://github.com/huggingface/diffusers/issues/11376#issue-3008144624
     if args.cache_latents:
@@ -1740,14 +1788,24 @@ def main(args):
     for epoch in range(first_epoch, args.num_train_epochs):
         transformer.train()
 
-        for step, batch in enumerate(train_dataloader):
+        for batch in train_dataloader:
             models_to_accumulate = [transformer]
+            sample_indices = batch["indices"]
             prompts = batch["prompts"]
 
             with accelerator.accumulate(models_to_accumulate):
                 if train_dataset.custom_instance_prompts:
-                    prompt_embeds = prompt_embeds_cache[step].to(device=accelerator.device)
-                    text_ids = text_ids_cache[step].to(device=accelerator.device)
+                    prompt_embeds = torch.cat([prompt_embeds_cache[idx] for idx in sample_indices], dim=0)
+                    text_ids = torch.cat([text_ids_cache[idx] for idx in sample_indices], dim=0)
+                    if args.with_prior_preservation:
+                        prompt_embeds = torch.cat(
+                            [prompt_embeds, class_prompt_hidden_states.repeat(len(sample_indices), 1, 1)], dim=0
+                        )
+                        text_ids = torch.cat(
+                            [text_ids, class_text_ids.repeat(len(sample_indices), 1, 1)], dim=0
+                        )
+                    prompt_embeds = prompt_embeds.to(device=accelerator.device)
+                    text_ids = text_ids.to(device=accelerator.device)
                 else:
                     # With prior preservation, prompt_embeds/text_ids already contain [instance, class] entries,
                     # while collate_fn orders batches as [inst1..instB, class1..classB]. Repeat each entry along
@@ -1758,10 +1816,13 @@ def main(args):
 
                 # Convert images to latent space
                 if args.cache_latents:
-                    if not isinstance(latents_cache[step], torch.Tensor):
-                        model_input = latents_cache[step].mode()
-                    else:
-                        model_input = latents_cache[step].to(device=accelerator.device)
+                    model_input = torch.cat([instance_latents_cache[idx] for idx in sample_indices], dim=0)
+                    if args.with_prior_preservation:
+                        model_input = torch.cat(
+                            [model_input, torch.cat([class_latents_cache[idx] for idx in sample_indices], dim=0)],
+                            dim=0,
+                        )
+                    model_input = model_input.to(device=accelerator.device)
                 else:
                     with offload_models(vae, device=accelerator.device, offload=args.offload):
                         pixel_values = batch["pixel_values"].to(device=accelerator.device, dtype=vae.dtype)
